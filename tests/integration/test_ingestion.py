@@ -3,6 +3,7 @@ import io
 import json
 import threading
 import uuid
+from datetime import timezone
 
 import duckdb
 import psycopg
@@ -10,7 +11,7 @@ import pyarrow.parquet as pq
 import pytest
 from psycopg import sql
 
-from aster import lake
+from aster import lake, pipeline, quality
 from aster.ingestion import extract_batch, ingest
 from aster.source import migrate, seed
 
@@ -80,7 +81,9 @@ def test_manifest_contract_and_checkpoint(lake_env):
         assert manifest["dataset"] == "service_events"
         assert manifest["record_count"] == 250
         assert manifest["cursor"]["column"] == "ingested_at"
-        assert manifest["cursor"]["start"] <= manifest["cursor"]["end"]
+        assert lake.cursor_end(manifest)[0] >= lake.cursor_end(
+            {"cursor": {"end": manifest["cursor"]["start"]}}
+        )[0]
         assert manifest["objects"][0]["key"].startswith(
             "service_events/ingest_date="
         )
@@ -88,7 +91,10 @@ def test_manifest_contract_and_checkpoint(lake_env):
         assert hashlib.sha256(payload).hexdigest() == manifest["objects"][0]["sha256"]
         assert manifest["objects"][0]["bytes"] == len(payload)
         assert pq.read_table(io.BytesIO(payload)).num_rows == 250
-    assert manifests[-1]["cursor"]["end"][0] == checkpoint[0].isoformat()
+    assert (
+        manifests[-1]["cursor"]["end"][0]
+        == checkpoint[0].astimezone(timezone.utc).isoformat()
+    )
     assert manifests[-1]["cursor"]["end"][1] == str(checkpoint[1])
     with connect(config) as connection:
         assert ingest(connection, s3, config, "manifest-2") == dict.fromkeys(
@@ -278,3 +284,45 @@ def test_concurrent_writers_are_captured_exactly_once(lake_env):
     for manifest in manifests:
         assert manifest["status"] == "complete"
         assert json.loads(json.dumps(manifest))["batch_id"] == manifest["batch_id"]
+
+def test_manifest_cursors_stay_ordered_for_non_utc_source_sessions(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    with psycopg.connect(
+        **config.postgres_kwargs(),
+        autocommit=True,
+        options="-c timezone=America/New_York",
+    ) as connection:
+        connection.execute(
+            sql.SQL("SET search_path TO {}").format(
+                sql.Identifier(config.postgres_schema)
+            )
+        )
+        totals = ingest(connection, s3, config, "timezone-1")
+        checkpoint = connection.execute(
+            "SELECT cursor_time, cursor_id FROM extraction_checkpoints "
+            "WHERE dataset = 'service_events'"
+        ).fetchone()
+    assert totals == {
+        "customers": 100,
+        "subscriptions": 100,
+        "payments": 100,
+        "service_events": 1000,
+    }
+    manifests = lake.raw_manifests(s3, config.raw_bucket, "service_events")
+    assert len(manifests) == 4
+    for manifest in manifests:
+        for bound in ("start", "end", "parent"):
+            assert manifest["cursor"][bound][0].endswith("+00:00"), manifest
+    cursor_ends = [lake.cursor_end(manifest) for manifest in manifests]
+    assert cursor_ends == sorted(cursor_ends)
+    assert cursor_ends[-1] == (
+        checkpoint[0].astimezone(timezone.utc),
+        str(checkpoint[1]),
+    )
+    with pipeline.connect_postgres(config) as connection:
+        checks = quality.validate_raw(s3, config, connection)
+    assert all(item.ok for item in checks)
+    assert {
+        item.name for item in checks if not item.ok
+    } == set()

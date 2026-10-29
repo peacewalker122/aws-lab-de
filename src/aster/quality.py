@@ -91,12 +91,12 @@ def validate_raw(s3, config, connection):
                     batch_id=manifest["batch_id"],
                 )
             )
+        cursor_ends = [lake.cursor_end(manifest) for manifest in manifests]
         checks.append(
             check(
                 f"raw.{dataset}.cursor_monotonic",
                 all(
-                    left["cursor"]["end"] <= right["cursor"]["end"]
-                    for left, right in zip(manifests, manifests[1:])
+                    left <= right for left, right in zip(cursor_ends, cursor_ends[1:])
                 ),
                 count=len(manifests),
             )

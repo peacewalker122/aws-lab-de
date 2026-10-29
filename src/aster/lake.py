@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timezone
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -61,6 +62,11 @@ def delete_keys(s3, bucket, keys):
         )
 
 
+def cursor_end(manifest):
+    timestamp, identifier = manifest["cursor"]["end"]
+    return (datetime.fromisoformat(timestamp).astimezone(timezone.utc), identifier)
+
+
 def raw_manifests(s3, bucket, dataset):
     prefix = f"{dataset}/"
     manifests = [
@@ -68,10 +74,7 @@ def raw_manifests(s3, bucket, dataset):
         for key in list_keys(s3, bucket, prefix)
         if key.endswith("/manifest.json")
     ]
-    return sorted(
-        manifests,
-        key=lambda item: (item["cursor"]["end"][0], item["cursor"]["end"][1]),
-    )
+    return sorted(manifests, key=cursor_end)
 
 
 def s3_uri(bucket, key):

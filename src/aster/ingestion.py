@@ -30,13 +30,20 @@ def _serialize(value):
     return value
 
 
+def _utc_iso(value):
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    return value.astimezone(timezone.utc).isoformat()
+
+
 def _checkpoint(connection, dataset):
     connection.execute(
         "INSERT INTO extraction_checkpoints VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
         (dataset, ZERO_CURSOR[0], ZERO_CURSOR[1]),
     )
     return connection.execute(
-        "SELECT cursor_time, cursor_id FROM extraction_checkpoints WHERE dataset = %s FOR UPDATE",
+        "SELECT cursor_time AT TIME ZONE 'UTC' AS cursor_time, cursor_id "
+        "FROM extraction_checkpoints WHERE dataset = %s FOR UPDATE",
         (dataset,),
     ).fetchone()
 
@@ -64,7 +71,8 @@ def extract_batch(connection, s3, bucket, dataset, batch_size, run_id):
         )
         previous = _checkpoint(connection, dataset)
         statement = sql.SQL(
-            "SELECT * FROM {} WHERE ({}, {}) > (%s, %s) ORDER BY {}, {} LIMIT %s"
+            "SELECT * FROM {} WHERE ({}, {}) > ((%s AT TIME ZONE 'UTC'), %s) "
+            "ORDER BY {}, {} LIMIT %s"
         ).format(
             sql.Identifier(dataset),
             sql.Identifier(cursor_column),
@@ -88,7 +96,7 @@ def extract_batch(connection, s3, bucket, dataset, batch_size, run_id):
         start, start_id = rows[0][cursor_column], rows[0][id_column]
         end, end_id = rows[-1][cursor_column], rows[-1][id_column]
         batch_id = lake.sha256_hex(
-            f"{dataset}|{SCHEMA_VERSION}|{checksum}|{end.isoformat()}|{end_id}".encode()
+            f"{dataset}|{SCHEMA_VERSION}|{checksum}|{_utc_iso(end)}|{end_id}".encode()
         )
         prefix = f"{dataset}/ingest_date={end.astimezone(timezone.utc).date().isoformat()}/batch={batch_id}"
         data_key = f"{prefix}/data.parquet"
@@ -102,9 +110,9 @@ def extract_batch(connection, s3, bucket, dataset, batch_size, run_id):
             "status": "complete",
             "cursor": {
                 "column": cursor_column,
-                "start": [start.isoformat(), str(start_id)],
-                "end": [end.isoformat(), str(end_id)],
-                "parent": [previous[0].isoformat(), str(previous[1])],
+                "start": [_utc_iso(start), str(start_id)],
+                "end": [_utc_iso(end), str(end_id)],
+                "parent": [_utc_iso(previous[0]), str(previous[1])],
             },
             "record_count": len(rows),
             "objects": [{"key": data_key, "sha256": checksum, "bytes": len(data)}],
