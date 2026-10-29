@@ -1,6 +1,6 @@
 # Aster Data Platform
 
-Aster is a local AWS-compatible proof of concept for a fictional telecom/SaaS business. Incremental ingestion into the raw lake zone is implemented and tested; analytical models, orchestration, recovery validation, and monitoring are not implemented yet. See [project.md](project.md) for requirements and milestones.
+Aster is a local AWS-compatible proof of concept for a fictional telecom/SaaS business. Incremental ingestion, silver/gold Parquet modeling, eight DuckDB analytical metrics, and quality gates are implemented and tested. Airflow orchestration, the reliability failure suite, and monitoring are not implemented yet. See [project.md](project.md) for requirements and milestones.
 
 ## Prerequisites
 
@@ -38,9 +38,17 @@ To change the local Terraform endpoint, set `TF_VAR_endpoint`; set `AWS_ENDPOINT
 
 ## Incremental ingestion
 
-After provisioning, `make migrate` initializes source tables and cursor triggers. `make seed` inserts a synthetic small dataset only when all source tables are empty; set `ASTER_SEED_SIZE` to `small`, `medium`, or `large` and `ASTER_SEED` to an integer to vary it. `make ingest` extracts batches into the raw bucket; `ASTER_BATCH_SIZE` controls batch size. Set overrides in `.env`. Ingestion is not yet a complete data pipeline.
+After provisioning, `make migrate` initializes source tables and cursor triggers. `make seed` inserts a synthetic small dataset only when all source tables are empty; set `ASTER_SEED_SIZE` to `small`, `medium`, or `large` and `ASTER_SEED` to an integer to vary it. `make ingest` extracts batches into the raw bucket; `ASTER_BATCH_SIZE` controls batch size. Set overrides in `.env`.
 
-Source triggers assign monotonically increasing cursor timestamps using a transactional clock row. Extraction takes a shared table lock for each batch, then advances its PostgreSQL checkpoint only after verifying S3 data and manifest. This serializes writes during each batch and trades throughput for correctness. Source deletes and event updates are rejected; disabling triggers or writing outside this contract invalidates cursor guarantees. Raw batches published before a checkpoint rollback are replayed idempotently with identical object keys and manifests. Integration tests cover concurrent writers, cursor ties, and interrupted checkpoint commits. Downstream deduplication and transformation recovery are not implemented yet.
+Source triggers assign monotonically increasing cursor timestamps using a transactional clock row. Extraction takes a shared table lock for each batch, then advances its PostgreSQL checkpoint only after verifying S3 data and manifest. This serializes writes during each batch and trades throughput for correctness. Source deletes and event updates are rejected; disabling triggers or writing outside this contract invalidates cursor guarantees. Raw batches published before a checkpoint rollback are replayed idempotently with identical object keys and manifests. Integration tests cover concurrent writers, cursor ties, and interrupted checkpoint commits.
+
+## Analytical pipeline
+
+`make pipeline` runs extraction, raw validation, silver transformation, silver validation, gold modeling, gold validation, and publication in one run. `RUN_ID` defaults to a UTC timestamp; override it with `make pipeline RUN_ID=my-run`. Individual stages are available as `make validate`, `make transform`, and the CLI stage commands used by Airflow.
+
+Silver writes deduplicated, validated Parquet per dataset with quarantined rejects and checksums. Gold writes `dim_customer`, `dim_subscription`, `fact_payments`, and `fact_service_events`; facts are partitioned by month and published through `gold/_committed.json` after all objects verify. Previous committed runs stay readable, so an interrupted build cannot corrupt the current dataset. Run summaries and all eight metric results are written to `s3://aster-local-artifacts/runs/<run-id>/`. Metric definitions, attribution rules, and quality gates are documented in [docs/metrics.md](docs/metrics.md).
+
+`make query` prints the eight metrics from the committed gold dataset with DuckDB reading Parquet directly from MiniStack. Metric SQL lives in `sql/analytics/` and is exercised against hand-computed fixtures in `tests/unit/test_metrics_fixtures.py`.
 
 ## Lifecycle and reset
 

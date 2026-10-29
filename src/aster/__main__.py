@@ -2,46 +2,129 @@ import argparse
 import json
 import sys
 
-import uuid
-from datetime import datetime, timezone
-
-import psycopg
-
-from aster import lake, obs
+from aster import lake, metrics, obs, pipeline
 from aster.config import Config
-from aster.ingestion import ingest
 from aster.source import create_database, migrate, seed
 
 
-def connect(config):
-    return psycopg.connect(
-        **config.postgres_kwargs(), autocommit=True, connect_timeout=5
-    )
-
-
-def new_run_id():
-    return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+def format_table(rows):
+    if not rows:
+        return "(no rows)"
+    columns = list(rows[0])
+    widths = {
+        column: max(len(str(column)), *(len(str(row[column])) for row in rows))
+        for column in columns
+    }
+    header = "  ".join(str(column).ljust(widths[column]) for column in columns)
+    lines = [header, "  ".join("-" * widths[column] for column in columns)]
+    for row in rows:
+        lines.append(
+            "  ".join(str(row[column]).ljust(widths[column]) for column in columns)
+        )
+    return "\n".join(lines)
 
 
 def dispatch(args, config, run_id):
+    s3 = lake.s3_client(config)
     if args.command == "migrate":
-        with connect(config) as connection:
+        with pipeline.connect_postgres(config) as connection:
             migrate(connection)
         return {"migrated": True}
     if args.command == "postgres-init":
-        with connect(config) as connection:
+        with pipeline.connect_postgres(config) as connection:
             created = create_database(connection, args.database)
         return {"database": args.database, "created": created}
     if args.command == "seed":
-        with connect(config) as connection:
+        with pipeline.connect_postgres(config) as connection:
             seed(connection, args.size, args.seed)
         return {"size": args.size, "seed": args.seed}
+    if args.command == "query":
+        connection = metrics.duckdb_connect(config)
+        try:
+            pointer = (
+                lake.get_json(
+                    s3, config.gold_bucket, f"gold/backfills/{args.gold_run}/manifest.json"
+                )
+                if args.gold_run
+                else None
+            )
+            pointer = metrics.create_gold_views(connection, s3, config, pointer)
+            names = metrics.METRICS if args.metric == "all" else (args.metric,)
+            results = {name: metrics.run_metric(connection, name) for name in names}
+        finally:
+            connection.close()
+        if args.format == "table":
+            for name, rows in results.items():
+                print(f"== {name}")
+                print(format_table(rows))
+        return {"gold_run_id": pointer["run_id"], "metrics": results}
+    pipeline.prepare(config, run_id)
     if args.command == "extract":
-        s3 = lake.s3_client(config)
-        obs.configure_logging("aster", run_id, config.loki_url)
-        with connect(config) as connection:
-            rows = ingest(connection, s3, config, run_id)
-        return {"rows": rows}
+        return pipeline.execute_stage(
+            "extract", run_id, s3, config, pipeline.extract, s3, config, run_id
+        )
+    if args.command == "validate-raw":
+        return pipeline.execute_stage(
+            "validate_raw", run_id, s3, config, pipeline.validate_raw, s3, config
+        )
+    if args.command == "transform-silver":
+        return pipeline.execute_stage(
+            "transform_silver",
+            run_id,
+            s3,
+            config,
+            pipeline.transform_silver,
+            s3,
+            config,
+            run_id,
+        )
+    if args.command == "validate-silver":
+        return pipeline.execute_stage(
+            "validate_silver",
+            run_id,
+            s3,
+            config,
+            pipeline.validate_silver,
+            s3,
+            config,
+        )
+    if args.command == "build-gold":
+        window = pipeline.parse_window(args.start, args.end) if args.start else None
+        return pipeline.execute_stage(
+            "build_gold",
+            run_id,
+            s3,
+            config,
+            pipeline.make_gold,
+            s3,
+            config,
+            run_id,
+            window,
+        )
+    if args.command == "validate-gold":
+        return pipeline.execute_stage(
+            "validate_gold",
+            run_id,
+            s3,
+            config,
+            pipeline.validate_gold_stage,
+            s3,
+            config,
+            run_id,
+        )
+    if args.command == "publish-run":
+        return pipeline.execute_stage(
+            "publish_run", run_id, s3, config, pipeline.publish, s3, config, run_id
+        )
+    if args.command == "pipeline":
+        window = pipeline.parse_window(args.start, args.end) if args.start else None
+        stages = pipeline.run_pipeline(config, run_id, window)
+        return {"stages": sorted(stages)}
+    if args.command == "backfill":
+        stages = pipeline.run_backfill(
+            config, run_id, *pipeline.parse_window(args.start, args.end)
+        )
+        return {"stages": sorted(stages)}
     raise ValueError(f"Unknown command {args.command}")
 
 
@@ -57,14 +140,35 @@ def build_parser():
         "--size", choices=("small", "medium", "large"), default="small"
     )
     seed_parser.add_argument("--seed", type=int, default=42)
-    commands.add_parser("extract")
+    for name in (
+        "extract",
+        "validate-raw",
+        "transform-silver",
+        "validate-silver",
+        "validate-gold",
+        "publish-run",
+    ):
+        commands.add_parser(name)
+    gold = commands.add_parser("build-gold")
+    gold.add_argument("--start", default=None)
+    gold.add_argument("--end", default=None)
+    pipeline_parser = commands.add_parser("pipeline")
+    pipeline_parser.add_argument("--start", default=None)
+    pipeline_parser.add_argument("--end", default=None)
+    backfill = commands.add_parser("backfill")
+    backfill.add_argument("--start", required=True)
+    backfill.add_argument("--end", required=True)
+    query = commands.add_parser("query")
+    query.add_argument("--metric", choices=("all", *metrics.METRICS), default="all")
+    query.add_argument("--format", choices=("json", "table"), default="json")
+    query.add_argument("--gold-run", default=None)
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     config = Config.from_env()
-    run_id = args.run_id or new_run_id()
+    run_id = args.run_id or pipeline.new_run_id()
     try:
         payload = dispatch(args, config, run_id)
     except Exception as error:
@@ -74,6 +178,7 @@ def main(argv=None):
             error=type(error).__name__,
             detail=str(error)[:4000],
         )
+        obs.flush_tracing()
         print(
             json.dumps(
                 {

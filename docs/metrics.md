@@ -1,0 +1,54 @@
+# Metric semantics
+
+All timestamps are stored in UTC. Silver datasets store naive UTC timestamps produced from the source `timestamptz` values. Fact table dates are UTC calendar dates.
+
+Raw batches are append-only. Silver deduplicates raw rows by business identity, keeping the row with the highest source cursor (`updated_at` for mutable tables, `ingested_at` for events). Gold is rebuilt from the committed silver snapshot into run-specific object prefixes; `gold/_committed.json` is the publication marker.
+
+| Surrogate key | Source | Ordering |
+|---|---|---|
+| `dim_customer.customer_key` | `row_number() OVER (ORDER BY customer_id)` | stable for a given silver snapshot |
+| `dim_subscription.subscription_key` | `row_number() OVER (ORDER BY subscription_id)` | stable for a given silver snapshot |
+
+`fact_payments.payment_date` is the UTC date of `paid_at`; it is null for payments that were never paid. `fact_service_events.event_date` is the UTC date of `event_time` (event time, not ingestion time). Facts are partitioned by `payment_month` and `event_month`.
+
+## 1. Daily successful payment revenue
+
+`sql/analytics/daily_successful_payment_revenue.sql`. Filters `payment_status = 'succeeded'` and a non-null `payment_date`, then sums `amount` per UTC payment date. Failed, pending and refunded payments are excluded. Payment totals are transaction amounts, not subscription MRR.
+
+## 2. Daily active customers
+
+`sql/analytics/daily_active_customers.sql`. Counts distinct `customer_key` values with at least one service event on the UTC event date. Service events are the activity signal; payments do not mark a customer active.
+
+## 3. Revenue by customer region
+
+`sql/analytics/revenue_by_region.sql`. Same revenue filter as metric 1, grouped by the region of the event's customer in `dim_customer`. A region without successful payments produces no row.
+
+## 4. Revenue by subscription plan
+
+`sql/analytics/revenue_by_plan.sql`. Same revenue filter as metric 1, grouped by `dim_subscription.plan_name`.
+
+## 5. Service error rate by day and region
+
+`sql/analytics/service_error_rate_by_day_region.sql`. Groups events by UTC event date and customer region. `error_count` counts `status_code >= 500`; `error_rate` is `error_count / event_count`. Events without a status code count as non-errors.
+
+## 6. p95 service event duration by day
+
+`sql/analytics/p95_service_duration_by_day.sql`. Uses DuckDB `quantile_cont(duration_ms, 0.95)` (linear interpolation) over non-null durations per UTC event date, plus the number of measured events.
+
+## 7. Daily event volume
+
+`sql/analytics/daily_event_volume.sql`. Counts service events per UTC event date.
+
+## 8. Seven-day revenue trend
+
+`sql/analytics/seven_day_revenue_trend.sql`. Builds a continuous daily spine between the first and last successful payment date and reports the trailing inclusive seven-day revenue sum (`ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`). Days without revenue contribute zero. A windowed backfill only matches a full rebuild for days whose complete trailing window is inside the backfill range.
+
+## Data quality gates
+
+Quality validation runs before publication and fails the run with a nonzero exit code:
+
+- Raw: manifest completeness, object checksums, cursor monotonicity, and source reconciliation (append-only events must match exactly; mutable tables require every current key to be captured with at least one version).
+- Silver: primary-key uniqueness, required fields, checksum verification, quarantine counts, and `accepted + rejected = distinct raw keys`.
+- Gold: row counts and checksums, surrogate-key uniqueness, and referential integrity of facts.
+
+Malformed rows are quarantined under `silver/<dataset>/run=<run>/rejected.parquet` with a `_reject_reason` column. Reasons include missing required fields, invalid statuses, negative amounts or durations, succeeded payments without `paid_at`, timestamps out of order, and unknown foreign keys.

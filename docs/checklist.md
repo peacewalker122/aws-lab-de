@@ -28,8 +28,19 @@
 
 Unverified at this milestone: no separate-process termination, transformation recovery, or backfill coverage yet.
 
-## M3 through M6
+## M3: analytical modeling
 
-Not implemented at this commit: analytical models, orchestration, reliability scenarios, and portfolio packaging.
+- [x] Silver deduplication by business key with UTC normalization and decimal preservation.
+- [x] Quarantine of malformed records with reject reasons; accepted + rejected reconciles to distinct raw keys.
+- [x] Gold dimensions and facts with deterministic surrogate keys and month partitions for facts.
+- [x] Atomic publication through `gold/_committed.json`; prior runs remain readable.
+- [x] Eight DuckDB metrics in `sql/analytics/` with hand-computed fixture tests.
+- [x] Quality gates for raw, silver, and gold stages with nonzero exit on failure.
+- [x] Metric semantics documented in `docs/metrics.md`.
+- [x] Integration test runs the complete pipeline against PostgreSQL and MiniStack and asserts row counts, checksums, artifacts and all eight metrics.
+
+## M4 through M6
+
+Not implemented at this commit: Airflow orchestration, the five reliability scenarios, and portfolio packaging.
 
 Athena coverage remains limited to a constant query; Glue integration remains unverified.
