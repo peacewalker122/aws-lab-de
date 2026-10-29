@@ -57,7 +57,10 @@ def main():
             {
                 "env": str(ENV_PATH),
                 "created": created,
-                "note": "Airflow and Grafana receive these values through their service environment",
+                "note": (
+                    "Airflow reads the file as its service environment; Grafana receives "
+                    "only GF_SECURITY_ADMIN_PASSWORD through compose interpolation"
+                ),
             }
         )
     )
