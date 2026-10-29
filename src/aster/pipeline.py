@@ -97,7 +97,25 @@ def execute_stage(name, run_id, s3, config, function, *args, **kwargs):
         "duration_ms": round((time.perf_counter() - started) * 1000, 3),
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
-    record_stage(s3, config, run_id, name, record)
+    try:
+        if name in {"publish_run", "publish_silver"}:
+            fail(f"{name}-stage-record")
+        record_stage(s3, config, run_id, name, record)
+    except Exception as error:
+        if name == "publish_run":
+            published = published_gold_for_run(s3, config, run_id)
+            if published:
+                record_published_artifact_failure(
+                    s3,
+                    config,
+                    run_id,
+                    published_gold_pointer_key(published),
+                    published.get("published_at"),
+                    load_stages(s3, config, run_id),
+                    error,
+                )
+        obs.log("stage_record_failed", stage=name, error=type(error).__name__)
+        raise
     obs.log("stage_completed", stage=name, duration_ms=record["duration_ms"])
     return record
 
@@ -134,6 +152,18 @@ def staged_silver_pointer(s3, config, run_id):
     return lake.get_json(s3, config.silver_bucket, staged_silver_pointer_key(run_id))
 
 
+def require_silver_ownership(pointer, run_id):
+    if pointer.get("run_id") != run_id:
+        raise ValueError(f"Staged silver pointer does not belong to run {run_id}")
+    for dataset, info in pointer.get("datasets", {}).items():
+        prefix = f"silver/{dataset}/run={run_id}/"
+        keys = info.get("objects", []) + info.get("rejected_objects", [])
+        if any(not key.startswith(prefix) for key in keys):
+            raise ValueError(
+                f"Silver objects for {dataset} do not belong to run {run_id}"
+            )
+
+
 def validate_silver_stage(s3, config, run_id):
     stages = load_stages(s3, config, run_id)
     build_stage = stages.get("transform_silver") or {}
@@ -148,6 +178,7 @@ def validate_silver_stage(s3, config, run_id):
             f"Run {run_id} has no staged silver pointer at "
             f"{staged_silver_pointer_key(run_id)}"
         )
+    require_silver_ownership(pointer, run_id)
     checks = quality.validate_silver(s3, config, pointer=pointer)
     quality.require(checks)
     obs.log("silver_validated", checks=[check.as_dict() for check in checks])
@@ -178,6 +209,9 @@ def require_silver_gate(s3, config, run_id, stages):
             f"Run {run_id} has no staged silver pointer at "
             f"{staged_silver_pointer_key(run_id)}"
         )
+    require_silver_ownership(pointer, run_id)
+    if validation.get("run_id") != run_id:
+        raise ValueError(f"Silver validation does not belong to run {run_id}")
     if silver_content_digest(pointer) != validation.get("content_digest"):
         raise ValueError(
             f"Staged silver pointer for run {run_id} changed after validation; "
@@ -228,7 +262,9 @@ def publish_silver(s3, config, run_id):
 
 def require_gated_silver(pointer):
     validation = pointer.get("validation") or {}
-    if validation.get("content_digest") != silver_content_digest(pointer):
+    if validation.get("run_id") != pointer.get("run_id") or validation.get(
+        "content_digest"
+    ) != silver_content_digest(pointer):
         raise ValueError(
             f"Committed silver run {pointer.get('run_id')} is not a validated snapshot; "
             "gold cannot be built from it. " + SILVER_GATE_REMEDY
@@ -561,14 +597,20 @@ def run_backfill(config, run_id, start, end):
     with pipeline_lock(config):
         s3 = lake.s3_client(config)
         execute_stage(
-            "build_gold", run_id, s3, config, make_gold, s3, config, run_id, (start, end)
+            "build_gold",
+            run_id,
+            s3,
+            config,
+            make_gold,
+            s3,
+            config,
+            run_id,
+            (start, end),
         )
         execute_stage(
             "validate_gold", run_id, s3, config, validate_gold_stage, s3, config, run_id
         )
-        execute_stage(
-            "publish_run", run_id, s3, config, publish, s3, config, run_id
-        )
+        execute_stage("publish_run", run_id, s3, config, publish, s3, config, run_id)
         return load_stages(s3, config, run_id)
 
 

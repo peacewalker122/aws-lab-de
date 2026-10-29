@@ -42,7 +42,10 @@ def metrics_for_pointer(config, s3, pointer):
         metrics.create_gold_views(connection, s3, config, pointer)
         return json.loads(
             json.dumps(
-                {name: metrics.run_metric(connection, name) for name in metrics.METRICS},
+                {
+                    name: metrics.run_metric(connection, name)
+                    for name in metrics.METRICS
+                },
                 default=str,
             )
         )
@@ -86,16 +89,16 @@ def test_gold_validates_against_the_silver_snapshot_it_was_built_from(lake_env):
     assert pointer["silver_run_id"] == "snap-a"
     assert pointer["silver"]["run_id"] == "snap-a"
     modified = rewrite_silver_payments(config, s3, "snap-silver-2")
-    assert modified["datasets"]["payments"]["row_count"] == (
-        pointer["silver"]["datasets"]["payments"]["row_count"]
+    assert (
+        modified["datasets"]["payments"]["row_count"]
+        == (pointer["silver"]["datasets"]["payments"]["row_count"])
     )
     assert payments_total(config, s3, modified) != payments_total(
         config, s3, pointer["silver"]
     )
 
     checks = {
-        item.name: item
-        for item in quality.validate_gold(s3, config, pointer=pointer)
+        item.name: item for item in quality.validate_gold(s3, config, pointer=pointer)
     }
     assert checks["gold.silver_snapshot"].ok
     assert checks["gold.fact_payments.silver_reconciliation"].ok
@@ -248,9 +251,7 @@ def test_cli_stages_publish_only_after_the_gate_passes(lake_env):
     assert json.loads(rejected.stdout)["error"]["type"] == "QualityError"
     blocked = run_aster(config, "--run-id", "cli-b", "publish-run", check=False)
     assert blocked.returncode == 1
-    assert (
-        lake.committed_pointer(s3, config.gold_bucket, "gold")["run_id"] == "cli-a"
-    )
+    assert lake.committed_pointer(s3, config.gold_bucket, "gold")["run_id"] == "cli-a"
     assert lake.get_json(s3, config.artifacts_bucket, "runs/cli-b/run.json") is None
 
 
@@ -325,9 +326,7 @@ def test_backfill_publishes_only_after_validation_and_records_its_metrics(lake_e
     pipeline.execute_stage(
         "publish_run", "bf-b", s3, config, pipeline.publish, s3, config, "bf-b"
     )
-    pointer = lake.get_json(
-        s3, config.gold_bucket, "gold/backfills/bf-b/manifest.json"
-    )
+    pointer = lake.get_json(s3, config.gold_bucket, "gold/backfills/bf-b/manifest.json")
     assert pointer["state"] == "published"
     assert pointer["window"] == [start.isoformat(), start.isoformat()]
     assert lake.committed_pointer(s3, config.gold_bucket, "gold") == committed
@@ -346,7 +345,14 @@ def test_publication_reverifies_gold_bytes_after_a_passing_gate(lake_env):
     committed = lake.committed_pointer(s3, config.gold_bucket, "gold")
     before = committed_metrics(config, s3)
     pipeline.execute_stage(
-        "build_gold", "reverify-b", s3, config, pipeline.make_gold, s3, config, "reverify-b"
+        "build_gold",
+        "reverify-b",
+        s3,
+        config,
+        pipeline.make_gold,
+        s3,
+        config,
+        "reverify-b",
     )
     pipeline.execute_stage(
         "validate_gold",
@@ -368,7 +374,9 @@ def test_publication_reverifies_gold_bytes_after_a_passing_gate(lake_env):
     assert "published.gold.fact_payments.checksums" in str(refused.value)
     assert lake.committed_pointer(s3, config.gold_bucket, "gold") == committed
     assert committed_metrics(config, s3) == before
-    assert lake.get_json(s3, config.artifacts_bucket, "runs/reverify-b/run.json") is None
+    assert (
+        lake.get_json(s3, config.artifacts_bucket, "runs/reverify-b/run.json") is None
+    )
 
 
 def test_publication_refuses_embedded_silver_corrupted_after_the_gold_gate(lake_env):
@@ -401,6 +409,29 @@ def test_publication_refuses_embedded_silver_corrupted_after_the_gold_gate(lake_
     assert lake.committed_pointer(s3, config.gold_bucket, "gold") == committed
 
 
+def test_final_stage_record_failure_reports_published_gold(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    pipeline.run_pipeline(config, "stage-record-a")
+    failed = run_aster(
+        config,
+        "--run-id",
+        "stage-record-a",
+        "publish-run",
+        extra_env={"ASTER_FAULT_FAILURE": "publish_run-stage-record"},
+        check=False,
+    )
+    assert failed.returncode == 1
+    assert (
+        lake.committed_pointer(s3, config.gold_bucket, "gold")["run_id"]
+        == "stage-record-a"
+    )
+    record = lake.get_json(s3, config.artifacts_bucket, "runs/stage-record-a/run.json")
+    assert record["status"] == "failed"
+    assert record["gold_state"] == "published"
+    assert record["error"]["type"] == "InjectedFault"
+
+
 def test_artifact_failure_after_the_pointer_commit_records_published_state(lake_env):
     config, s3 = lake_env.config, lake_env.s3
     seeded(config)
@@ -422,9 +453,10 @@ def test_artifact_failure_after_the_pointer_commit_records_published_state(lake_
     assert record["gold_state"] == "published"
     assert record["gold_pointer"] == "gold/_committed.json"
     assert record["error"]["type"] == "InjectedFault"
-    assert len(
-        lake.get_json(s3, config.artifacts_bucket, "runs/artifact-a/metrics.json")
-    ) == 8
+    assert (
+        len(lake.get_json(s3, config.artifacts_bucket, "runs/artifact-a/metrics.json"))
+        == 8
+    )
     assert metrics_for_pointer(config, s3, pointer)
 
     retried = run_aster(config, "--run-id", "artifact-a", "publish-run")
@@ -467,9 +499,10 @@ def test_windowed_pipeline_artifact_failure_records_published_state(lake_env):
     assert record["gold_state"] == "published"
     assert record["gold_pointer"] == pointer_key
     assert record["error"]["type"] == "InjectedFault"
-    assert len(
-        lake.get_json(s3, config.artifacts_bucket, f"runs/{run_id}/metrics.json")
-    ) == 8
+    assert (
+        len(lake.get_json(s3, config.artifacts_bucket, f"runs/{run_id}/metrics.json"))
+        == 8
+    )
 
 
 def test_gold_validation_requires_a_checksum_for_every_output_object(lake_env):

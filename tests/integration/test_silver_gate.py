@@ -36,7 +36,14 @@ def corrupt_parquet(s3, bucket, key, drop_last_row=False):
 
 def stage_silver(s3, config, run_id):
     return pipeline.execute_stage(
-        "transform_silver", run_id, s3, config, pipeline.transform_silver, s3, config, run_id
+        "transform_silver",
+        run_id,
+        s3,
+        config,
+        pipeline.transform_silver,
+        s3,
+        config,
+        run_id,
     )
 
 
@@ -55,18 +62,51 @@ def gate_silver(s3, config, run_id):
 
 def publish_silver(s3, config, run_id):
     return pipeline.execute_stage(
-        "publish_silver", run_id, s3, config, pipeline.publish_silver, s3, config, run_id
+        "publish_silver",
+        run_id,
+        s3,
+        config,
+        pipeline.publish_silver,
+        s3,
+        config,
+        run_id,
     )
 
 
 def staged_silver(config, s3, run_id):
-    return lake.get_json(
-        s3, config.silver_bucket, f"silver/_staged/{run_id}.json"
-    )
+    return lake.get_json(s3, config.silver_bucket, f"silver/_staged/{run_id}.json")
 
 
 def committed_silver(config, s3):
     return lake.committed_pointer(s3, config.silver_bucket, "silver")
+
+
+def test_silver_gate_rejects_copied_pointer_and_validation(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    stage_silver(s3, config, "owner-a")
+    stage_silver(s3, config, "owner-b")
+    pointer_a = staged_silver(config, s3, "owner-a")
+    pointer_b = staged_silver(config, s3, "owner-b")
+    key = "silver/_staged/owner-b.json"
+    lake.put_json(s3, config.silver_bucket, key, pointer_a)
+    with pytest.raises(ValueError, match="does not belong"):
+        gate_silver(s3, config, "owner-b")
+    lake.put_json(s3, config.silver_bucket, key, pointer_b)
+    gate_silver(s3, config, "owner-b")
+    forged = {**pointer_b, "datasets": {**pointer_b["datasets"]}}
+    forged["datasets"]["customers"] = pointer_a["datasets"]["customers"]
+    lake.put_json(s3, config.silver_bucket, key, forged)
+    with pytest.raises(ValueError, match="do not belong"):
+        publish_silver(s3, config, "owner-b")
+    lake.put_json(s3, config.silver_bucket, key, pointer_b)
+    stage_key = "runs/owner-b/stages/validate_silver.json"
+    gate = lake.get_json(s3, config.artifacts_bucket, stage_key)
+    gate["validation"]["run_id"] = "owner-a"
+    lake.put_json(s3, config.artifacts_bucket, stage_key, gate)
+    with pytest.raises(ValueError, match="validation does not belong"):
+        publish_silver(s3, config, "owner-b")
+    assert committed_silver(config, s3) is None
 
 
 def test_build_silver_stages_without_moving_the_committed_pointer(lake_env):
@@ -94,7 +134,9 @@ def test_corrupted_staged_silver_blocks_validation_and_publication(lake_env):
     ][0]
     corrupt_parquet(s3, config.silver_bucket, object_key)
 
-    rejected = run_aster(config, "--run-id", "corrupt-b", "validate-silver", check=False)
+    rejected = run_aster(
+        config, "--run-id", "corrupt-b", "validate-silver", check=False
+    )
     assert rejected.returncode == 1
     assert json.loads(rejected.stdout)["error"]["type"] == "QualityError"
     assert "silver.payments.checksum" in rejected.stdout
@@ -159,7 +201,9 @@ def test_gold_build_refuses_silver_modified_after_validation(lake_env):
     config, s3 = lake_env.config, lake_env.s3
     seeded(config)
     pipeline.run_pipeline(config, "modify-a")
-    object_key = committed_silver(config, s3)["datasets"]["service_events"]["objects"][0]
+    object_key = committed_silver(config, s3)["datasets"]["service_events"]["objects"][
+        0
+    ]
     corrupt_parquet(s3, config.silver_bucket, object_key)
 
     refused = run_aster(config, "--run-id", "modify-b", "build-gold", check=False)
