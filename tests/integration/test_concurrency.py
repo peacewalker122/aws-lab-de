@@ -135,21 +135,30 @@ def test_overlapping_pipelines_serialize_and_publish_own_output(
     )
 
 
-def test_publish_refuses_another_runs_committed_gold(lake_env):
+def test_publish_refuses_a_run_that_lost_the_publication_race(lake_env):
     config, s3 = lake_env.config, lake_env.s3
     seeded(config)
-    pipeline.run_pipeline(config, "fence-a")
-    pipeline.execute_stage(
-        "build_gold", "fence-b", s3, config, pipeline.make_gold, s3, config, "fence-b"
-    )
-    pipeline.run_pipeline(config, "fence-c")
-    with pytest.raises(ValueError, match="belongs to run fence-c"):
-        pipeline.publish(s3, config, "fence-b")
+    pipeline.run_pipeline(config, "race-silver")
+    for run_id in ("race-a", "race-b"):
+        pipeline.execute_stage(
+            "build_gold", run_id, s3, config, pipeline.make_gold, s3, config, run_id
+        )
+        pipeline.execute_stage(
+            "validate_gold",
+            run_id,
+            s3,
+            config,
+            pipeline.validate_gold_stage,
+            s3,
+            config,
+            run_id,
+        )
+    pipeline.publish(s3, config, "race-b")
+    with pytest.raises(ValueError, match="belongs to run race-b"):
+        pipeline.publish(s3, config, "race-a")
+    assert lake.get_json(s3, config.artifacts_bucket, "runs/race-a/run.json") is None
     assert (
-        lake.get_json(s3, config.artifacts_bucket, "runs/fence-b/run.json") is None
-    )
-    assert (
-        lake.committed_pointer(s3, config.gold_bucket, "gold")["run_id"] == "fence-c"
+        lake.committed_pointer(s3, config.gold_bucket, "gold")["run_id"] == "race-b"
     )
 
 
@@ -173,6 +182,16 @@ def test_publish_refuses_gold_built_from_another_silver_run(lake_env):
         s3,
         config,
         pipeline.transform_silver,
+        s3,
+        config,
+        "silver-b",
+    )
+    pipeline.execute_stage(
+        "validate_gold",
+        "silver-b",
+        s3,
+        config,
+        pipeline.validate_gold_stage,
         s3,
         config,
         "silver-b",

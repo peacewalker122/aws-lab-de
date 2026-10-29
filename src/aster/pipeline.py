@@ -10,7 +10,13 @@ from psycopg import sql
 
 from aster import lake, metrics, obs, quality
 from aster.ingestion import ingest
-from aster.transform import build_gold, build_silver
+from aster.transform import (
+    GOLD_COMMITTED_KEY,
+    backfill_pointer_key,
+    build_gold,
+    build_silver,
+    staged_pointer_key,
+)
 
 
 def new_run_id():
@@ -133,69 +139,125 @@ def make_gold(s3, config, run_id, window=None):
         "silver_run_id": silver_pointer["run_id"],
         "tables": {name: info["row_count"] for name, info in result.tables.items()},
         "window": list(window) if window else None,
+        "state": "staged",
+        "staged_pointer": staged_pointer_key(run_id),
     }
+
+
+def staged_gold_pointer(s3, config, run_id):
+    return lake.get_json(s3, config.gold_bucket, staged_pointer_key(run_id))
+
+
+def published_gold_pointer_key(pointer):
+    if pointer.get("window"):
+        return backfill_pointer_key(pointer["run_id"])
+    return GOLD_COMMITTED_KEY
 
 
 def validate_gold_stage(s3, config, run_id):
     stages = load_stages(s3, config, run_id)
-    window = stages.get("build_gold", {}).get("window")
-    pointer = (
-        lake.get_json(
-            s3, config.gold_bucket, f"gold/backfills/{run_id}/manifest.json"
+    build_stage = stages.get("build_gold") or {}
+    if build_stage.get("gold_run_id") != run_id:
+        raise ValueError(
+            f"Run {run_id} has no gold output of its own; the build record names "
+            f"{build_stage.get('gold_run_id')}"
         )
-        if window
-        else None
+    pointer = staged_gold_pointer(s3, config, run_id)
+    if pointer is None:
+        raise ValueError(
+            f"Run {run_id} has no staged gold pointer at {staged_pointer_key(run_id)}"
+        )
+    checks = quality.validate_gold(
+        s3, config, pointer=pointer, window=build_stage.get("window")
     )
-    checks = quality.validate_gold(s3, config, pointer=pointer, window=window)
     quality.require(checks)
     obs.log("gold_validated", checks=[check.as_dict() for check in checks])
-    return {"checks": [check.as_dict() for check in checks]}
+    return {
+        "checks": [check.as_dict() for check in checks],
+        "passed": True,
+        "state": "validated",
+        "staged_pointer": staged_pointer_key(run_id),
+        "pointer_digest": lake.json_digest(pointer),
+    }
 
 
-def gold_pointer_for_run(s3, config, run_id, stages):
-    window = stages.get("build_gold", {}).get("window")
-    if window:
-        return lake.get_json(
-            s3, config.gold_bucket, f"gold/backfills/{run_id}/manifest.json"
-        )
-    return lake.committed_pointer(s3, config.gold_bucket, "gold")
-
-
-def require_run_ownership(s3, config, run_id, stages):
-    build_gold_stage = stages.get("build_gold", {})
-    recorded_run = build_gold_stage.get("gold_run_id")
-    if recorded_run != run_id:
+def require_publish_gate(s3, config, run_id, stages):
+    gate = stages.get("validate_gold") or {}
+    if gate.get("passed") is not True:
         raise ValueError(
-            f"Run {run_id} has no gold output of its own; the build record names {recorded_run}"
+            f"Run {run_id} has no passing gold validation; publication is blocked until "
+            "validate-gold succeeds for the staged output"
+        )
+    pointer = staged_gold_pointer(s3, config, run_id)
+    if pointer is None:
+        raise ValueError(
+            f"Run {run_id} has no staged gold pointer at {staged_pointer_key(run_id)}"
+        )
+    if lake.json_digest(pointer) != gate.get("pointer_digest"):
+        raise ValueError(
+            f"Staged gold pointer for run {run_id} changed after validation; "
+            "re-run validate-gold before publishing"
+        )
+    return pointer
+
+
+def require_run_ownership(s3, config, run_id, stages, pointer):
+    build_stage = stages.get("build_gold") or {}
+    if build_stage.get("gold_run_id") != run_id:
+        raise ValueError(
+            f"Run {run_id} has no gold output of its own; the build record names "
+            f"{build_stage.get('gold_run_id')}"
         )
     silver_stage = stages.get("transform_silver")
-    if silver_stage and build_gold_stage.get("silver_run_id") != silver_stage.get(
+    if silver_stage and pointer.get("silver_run_id") != silver_stage.get(
         "silver_run_id"
     ):
         raise ValueError(
             f"Run {run_id} built gold from silver run "
-            f"{build_gold_stage.get('silver_run_id')} but transformed silver "
+            f"{pointer.get('silver_run_id')} but transformed silver "
             f"{silver_stage.get('silver_run_id')}"
         )
-    pointer = gold_pointer_for_run(s3, config, run_id, stages)
-    owner = (pointer or {}).get("run_id")
-    if owner != run_id:
+    committed_silver = lake.committed_pointer(s3, config.silver_bucket, "silver")
+    committed_silver_run = (committed_silver or {}).get("run_id")
+    if committed_silver_run != pointer.get("silver_run_id"):
         raise ValueError(
-            f"Committed gold output belongs to run {owner}, not {run_id}; "
-            "refusing to publish another run's dataset"
+            f"Run {run_id} built gold from silver run {pointer.get('silver_run_id')} "
+            f"but the committed silver snapshot is {committed_silver_run}; "
+            "rebuild gold before publishing"
         )
+    committed_gold = lake.committed_pointer(s3, config.gold_bucket, "gold")
+    if committed_gold and committed_gold.get("run_id") != run_id:
+        published_after = lake.parse_instant(
+            committed_gold["created_at"]
+        ) >= lake.parse_instant(pointer["created_at"])
+        if published_after:
+            raise ValueError(
+                f"Committed gold output belongs to run {committed_gold.get('run_id')}, "
+                f"which was published after run {run_id}; refusing to publish "
+                "another run's dataset"
+            )
     return pointer
 
 
 def publish(s3, config, run_id, status="success"):
     stages = load_stages(s3, config, run_id)
-    gold_pointer = require_run_ownership(s3, config, run_id, stages)
+    pointer = require_publish_gate(s3, config, run_id, stages)
+    require_run_ownership(s3, config, run_id, stages, pointer)
     connection = metrics.warehouse_connection(config)
     try:
-        metrics.create_gold_views(connection, s3, config, gold_pointer)
+        metrics.create_gold_views(connection, s3, config, pointer)
         results = metrics.run_all(connection)
     finally:
         connection.close()
+    published_at = datetime.now(timezone.utc).isoformat()
+    published_key = published_gold_pointer_key(pointer)
+    lake.put_json(
+        s3,
+        config.gold_bucket,
+        published_key,
+        {**pointer, "state": "published", "published_at": published_at},
+    )
+    obs.log("gold_published", run_id=run_id, pointer=published_key)
     silver = stages.get("transform_silver", {}).get("datasets", {})
     row_totals = {
         "extracted": sum(stages.get("extract", {}).get("rows", {}).values()),
@@ -207,6 +269,9 @@ def publish(s3, config, run_id, status="success"):
     artifact = {
         "run_id": run_id,
         "status": status,
+        "gold_state": "published",
+        "gold_pointer": published_key,
+        "staged_pointer": staged_pointer_key(run_id),
         "window": stages.get("build_gold", {}).get("window"),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "silver_run_id": stages.get("transform_silver", {}).get("silver_run_id"),
@@ -278,6 +343,7 @@ def _run_pipeline(config, run_id, window=None):
                 {
                     "run_id": run_id,
                     "status": "failed",
+                    "gold_state": "unpublished",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "error": {
                         "type": type(error).__name__,

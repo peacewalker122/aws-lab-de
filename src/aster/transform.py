@@ -18,6 +18,8 @@ FACT_DATE_COLUMN = {"fact_payments": "paid_at", "fact_service_events": "event_ti
 FACT_PARTITION = {"fact_payments": "payment_month", "fact_service_events": "event_month"}
 TREND_LOOKBACK_DAYS = 6
 TREND_SEED_TABLE = "revenue_trend_seed"
+GOLD_STAGED_PREFIX = "gold/_staged"
+GOLD_COMMITTED_KEY = "gold/_committed.json"
 PRIMARY_KEYS = {
     "customers": "customer_id",
     "subscriptions": "subscription_id",
@@ -46,6 +48,14 @@ class GoldResult:
     tables: dict
     trend_seed: dict
     pointer: dict
+
+
+def staged_pointer_key(run_id):
+    return f"{GOLD_STAGED_PREFIX}/{run_id}.json"
+
+
+def backfill_pointer_key(run_id):
+    return f"gold/backfills/{run_id}/manifest.json"
 
 
 def connect(config):
@@ -356,6 +366,7 @@ def build_gold(s3, config, run_id, silver_pointer, window=None):
         hit("gold-before-publish")
         pointer = {
             "run_id": run_id,
+            "state": "staged",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "silver_run_id": silver_pointer["run_id"],
             "window": [window[0].isoformat(), window[1].isoformat()]
@@ -365,15 +376,7 @@ def build_gold(s3, config, run_id, silver_pointer, window=None):
             "trend_seed": trend_seed,
             "tables": tables,
         }
-        if window:
-            lake.put_json(
-                s3,
-                config.gold_bucket,
-                f"gold/backfills/{run_id}/manifest.json",
-                pointer,
-            )
-        else:
-            lake.put_json(s3, config.gold_bucket, "gold/_committed.json", pointer)
+        lake.put_json(s3, config.gold_bucket, staged_pointer_key(run_id), pointer)
         return GoldResult(
             run_id=run_id, tables=tables, trend_seed=trend_seed, pointer=pointer
         )

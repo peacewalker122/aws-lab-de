@@ -26,11 +26,19 @@ def sha256_hex(data):
 
 
 def put_json(s3, bucket, key, payload):
-    body = json.dumps(payload, sort_keys=True, default=str).encode()
+    body = json_body(payload)
     s3.put_object(
         Bucket=bucket, Key=key, Body=body, ContentType="application/json"
     )
     return body
+
+
+def json_body(payload):
+    return json.dumps(payload, sort_keys=True, default=str).encode()
+
+
+def json_digest(payload):
+    return sha256_hex(json_body(payload))
 
 
 def get_json(s3, bucket, key):
@@ -60,6 +68,16 @@ def delete_keys(s3, bucket, keys):
         s3.delete_objects(
             Bucket=bucket, Delete={"Objects": [{"Key": key} for key in chunk]}
         )
+
+
+def parse_instant(value):
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"Manifest cursor timestamp {value!r} has no UTC offset; "
+            "naive timestamps are ambiguous and are rejected"
+        )
+    return parsed.astimezone(timezone.utc)
 
 
 def cursor_end(manifest):
