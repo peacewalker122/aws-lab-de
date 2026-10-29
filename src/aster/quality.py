@@ -24,6 +24,18 @@ REQUIRED_COLUMNS = {
     "payments": ("payment_id", "subscription_id", "amount", "currency", "status"),
     "service_events": ("event_id", "customer_id", "event_type", "event_time"),
 }
+GOLD_TABLES = (
+    "dim_customer",
+    "dim_subscription",
+    "fact_payments",
+    "fact_service_events",
+)
+GOLD_POINTER_KEYS = ("run_id", "silver_run_id", "silver", "trend_seed")
+GOLD_REBUILD_REMEDY = (
+    "Rebuild gold from the committed silver snapshot and republish: "
+    "python -m aster --run-id <new-run-id> pipeline (or make transform). "
+    "Existing gold objects are preserved."
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +69,22 @@ def require(checks):
 
 def _dataset_uris(bucket, keys):
     return [lake.s3_uri(bucket, key) for key in keys]
+
+
+def gold_pointer_contract(pointer):
+    missing = [key for key in GOLD_POINTER_KEYS if pointer.get(key) is None]
+    missing += [
+        f"tables.{table}"
+        for table in GOLD_TABLES
+        if not isinstance(pointer.get("tables", {}).get(table), dict)
+    ]
+    return check(
+        "gold.pointer_contract",
+        not missing,
+        missing=missing,
+        legacy=bool(missing),
+        remedy=GOLD_REBUILD_REMEDY if missing else None,
+    )
 
 
 def validate_raw(s3, config, connection):
@@ -319,6 +347,10 @@ def validate_gold(s3, config, pointer=None, snapshot=None, window=None):
     checks = [check("gold.committed_pointer", pointer is not None)]
     if pointer is None:
         return checks
+    contract = gold_pointer_contract(pointer)
+    checks.append(contract)
+    if not contract.ok:
+        return checks
     snapshot = snapshot or pointer.get("silver")
     if snapshot is None:
         snapshot = lake.committed_pointer(s3, config.silver_bucket, "silver")
@@ -350,7 +382,7 @@ def validate_gold(s3, config, pointer=None, snapshot=None, window=None):
     window = tuple(date.fromisoformat(str(value)) for value in window or pointer.get("window") or ())
     bounds = window_bounds(*window) if window else None
     connection = connect(config)
-    for table in ("dim_customer", "dim_subscription", "fact_payments", "fact_service_events"):
+    for table in GOLD_TABLES:
         info = pointer["tables"][table]
         uris = _dataset_uris(config.gold_bucket, info["objects"])
         observed = connection.execute(

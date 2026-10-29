@@ -27,6 +27,13 @@ def create_gold_views(connection, s3, config, pointer=None):
             "CREATE OR REPLACE VIEW revenue_trend_seed AS SELECT calendar_date, is_lookback, prior_revenue "
             f"FROM read_parquet([{sql_list(uris)}], union_by_name=true)"
         )
+    elif pointer.get("window"):
+        start, end = pointer["window"]
+        raise ValueError(
+            f"Backfill run {pointer['run_id']} predates revenue_trend_seed; rebuild it with "
+            f"`python -m aster --run-id <new-run-id> backfill --start {start} --end {end}`. "
+            "Existing gold objects are preserved."
+        )
     else:
         connection.execute(
             "CREATE OR REPLACE VIEW revenue_trend_seed AS "
