@@ -1,22 +1,53 @@
+import hashlib
+import io
 import os
 import re
 import subprocess
 
 import pytest
 
-from aster import lake
-from aster.config import Config
+import pyarrow.parquet as pq
+
+from aster import lake, pipeline
+from aster.ingestion import ingest
+from aster.source import migrate, seed
 
 pytestmark = [pytest.mark.integration, pytest.mark.airflow]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-COMPOSE = ["docker", "compose", "-f", "infrastructure/compose.yaml", "--profile", "airflow"]
+COMPOSE = [
+    "docker",
+    "compose",
+    "-f",
+    "infrastructure/compose.yaml",
+    "--env-file",
+    ".env",
+    "--profile",
+    "airflow",
+]
 CONNECTION = (
     'export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://aster:$POSTGRES_PASSWORD@postgres:5432/airflow"; '
 )
 
 
-def airflow(*arguments, check=True):
+def isolated_environment(config):
+    values = {
+        "ASTER_POSTGRES_SCHEMA": config.postgres_schema,
+        "ASTER_RAW_BUCKET": config.raw_bucket,
+        "ASTER_SILVER_BUCKET": config.silver_bucket,
+        "ASTER_GOLD_BUCKET": config.gold_bucket,
+        "ASTER_ARTIFACTS_BUCKET": config.artifacts_bucket,
+        "ASTER_LOKI_URL": "",
+        "ASTER_OTLP_ENDPOINT": "",
+        "ASTER_PUSHGATEWAY_URL": "",
+    }
+    return "export " + " ".join(
+        f'{key}="{value}"' for key, value in values.items()
+    ) + "; "
+
+
+def airflow(config, *arguments, check=True):
+    prefix = isolated_environment(config) if config else ""
     return subprocess.run(
         COMPOSE
         + [
@@ -25,7 +56,7 @@ def airflow(*arguments, check=True):
             "airflow-scheduler",
             "bash",
             "-c",
-            CONNECTION + " ".join(arguments),
+            prefix + CONNECTION + " ".join(arguments),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -56,29 +87,46 @@ def require_airflow():
         pytest.skip("local Aster environment is not configured")
 
 
-def sanitized_run_id(output, logical_date):
-    match = re.search(r"run_id=(manual__[^,\s]+)", output)
+def seeded(config):
+    with pipeline.connect_postgres(config) as connection:
+        migrate(connection)
+        seed(connection, "small", 42)
+
+
+def sanitized_run_id(output):
+    match = re.search(r"run_id=(manual__[^,\s\"]+)", output)
     if not match:
         raise AssertionError("Airflow output did not report a run id")
     return match.group(1).replace(".", "-").replace(":", "-").replace("+", "-")
 
 
+def corrupt_first_raw_object(config, s3, dataset):
+    manifest = lake.raw_manifests(s3, config.raw_bucket, dataset)[0]
+    key = manifest["objects"][0]["key"]
+    table = pq.read_table(io.BytesIO(lake.read_bytes(s3, config.raw_bucket, key)))
+    buffer = io.BytesIO()
+    pq.write_table(table.slice(0, table.num_rows - 1), buffer, compression="zstd")
+    s3.put_object(Bucket=config.raw_bucket, Key=key, Body=buffer.getvalue())
+    stored = lake.read_bytes(s3, config.raw_bucket, key)
+    assert hashlib.sha256(stored).hexdigest() != manifest["objects"][0]["sha256"]
+    return key
+
+
 def test_dag_is_registered():
     require_airflow()
-    listed = airflow("airflow", "dags", "list").stdout
+    listed = airflow(None, "airflow", "dags", "list").stdout
     assert "aster_pipeline" in listed
-    assert "orchestration/dags/aster_pipeline.py" in listed or "aster_pipeline.py" in listed
+    assert "aster_pipeline.py" in listed
 
 
-def test_airflow_run_completes_and_publishes():
+def test_airflow_run_completes_in_isolated_schema_and_buckets(lake_env):
     require_airflow()
-    logical_date = "2026-01-04"
-    completed = airflow("airflow", "dags", "test", "aster_pipeline", logical_date)
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    completed = airflow(config, "airflow", "dags", "test", "aster_pipeline", "2026-01-04")
     output = completed.stdout + completed.stderr
     assert "state=success" in output
-    run_id = sanitized_run_id(output, logical_date)
-    config = Config.from_env()
-    s3 = lake.s3_client(config)
+    run_id = sanitized_run_id(output)
     artifact = lake.get_json(
         s3, config.artifacts_bucket, f"runs/{run_id}/run.json"
     )
@@ -100,23 +148,48 @@ def test_airflow_run_completes_and_publishes():
     )
     assert len(metrics) == 8
     gold = lake.committed_pointer(s3, config.gold_bucket, "gold")
-    assert gold is not None and gold["tables"]["fact_service_events"]["row_count"] > 0
+    assert gold is not None
+    assert gold["run_id"] == run_id
+    assert gold["tables"]["fact_service_events"]["row_count"] == 1000
+    silver = lake.committed_pointer(s3, config.silver_bucket, "silver")
+    assert silver["run_id"] == run_id
 
 
-def test_airflow_quality_failure_propagates_and_skips_publication():
+def test_failed_quality_gate_blocks_publication(lake_env):
     require_airflow()
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    with pipeline.connect_postgres(config) as connection:
+        ingest(connection, s3, config, "pre-ingest")
+    corrupted = corrupt_first_raw_object(config, s3, "customers")
+    assert lake.committed_pointer(s3, config.gold_bucket, "gold") is None
     failed = airflow(
-        "airflow",
-        "dags",
-        "test",
-        "aster_pipeline",
-        "2026-01-05",
-        "--conf",
-        '\'{"window_start": "2025-12-31", "window_end": "2025-01-01"}\'',
-        check=False,
+        config, "airflow", "dags", "test", "aster_pipeline", "2026-01-05", check=False
     )
     output = failed.stdout + failed.stderr
     assert failed.returncode != 0
     assert "state=failed" in output
-    assert "publish_run" in output
-    assert "DAG TEST] starting task_id=publish_run" not in output
+    assert '"command": "validate-raw"' in output
+    assert '"status": "failed"' in output
+    run_id = sanitized_run_id(output)
+    stages = sorted(
+        key.rsplit("/", 1)[-1][: -len(".json")]
+        for key in lake.list_keys(
+            s3, config.artifacts_bucket, f"runs/{run_id}/stages/"
+        )
+    )
+    assert stages == ["extract"]
+    assert (
+        lake.get_json(s3, config.artifacts_bucket, f"runs/{run_id}/run.json") is None
+    )
+    assert lake.list_keys(s3, config.gold_bucket, "") == []
+    assert lake.committed_pointer(s3, config.gold_bucket, "gold") is None
+    assert lake.read_bytes(s3, config.raw_bucket, corrupted)
+
+
+def test_airflow_admin_password_file_is_owner_only(lake_env):
+    require_airflow()
+    mode = airflow(
+        lake_env.config, "stat", "-c", "%a", "/opt/airflow/simple_auth_passwords.json"
+    ).stdout.strip()
+    assert mode == "600"
