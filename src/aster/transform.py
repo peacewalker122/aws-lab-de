@@ -96,9 +96,14 @@ def _row_count(connection, uris):
 def _publish_objects(
     s3, bucket, connection, prefix, query, row_count, partition_by=None, filename="data.parquet"
 ):
-    partitioned = partition_by and row_count
+    partitioned = bool(partition_by) and row_count > 0
     target = prefix if partitioned else f"{prefix}/{filename}"
-    _copy_to_s3(connection, query, lake.s3_uri(bucket, target), partition_by)
+    _copy_to_s3(
+        connection,
+        query,
+        lake.s3_uri(bucket, target),
+        partition_by if partitioned else None,
+    )
     keys = sorted(
         key
         for key in lake.list_keys(
