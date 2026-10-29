@@ -4,7 +4,7 @@ variable "endpoint" {
 
   validation {
     condition     = can(regex("^http://(127\\.0\\.0\\.1|localhost):[0-9]+$", var.endpoint))
-    error_message = "The M0 endpoint must be a loopback HTTP URL with a port."
+    error_message = "The local endpoint must be a loopback HTTP URL with a port."
   }
 }
 
@@ -18,7 +18,7 @@ variable "environment" {
   default = "local"
 
   validation {
-    condition     = can(regex("^[a-z0-9-]+$", var.environment))
-    error_message = "Environment must contain only lowercase letters, numbers, and hyphens."
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$", var.environment))
+    error_message = "Environment must be 1-41 lowercase letters, numbers, or hyphens, starting and ending with a letter or number."
   }
 }

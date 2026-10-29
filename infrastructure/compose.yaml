@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: docker.io/library/postgres:16.10
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_USER: aster
+      POSTGRES_DB: aster
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aster -d aster"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
   ministack:
     image: docker.io/ministackorg/ministack:1.5.33-full
     ports:
@@ -17,6 +35,8 @@ services:
       retries: 30
       start_period: 10s
 
+
 volumes:
+  postgres-data:
   ministack-state:
   ministack-s3:
