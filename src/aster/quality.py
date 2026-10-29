@@ -6,8 +6,10 @@ from aster import lake
 from aster.transform import (
     PRIMARY_KEYS,
     SILVER_DATASETS,
+    SILVER_GATE_REMEDY,
     TREND_LOOKBACK_DAYS,
     connect,
+    silver_content_digest,
     sql_list,
     window_bounds,
 )
@@ -69,6 +71,21 @@ def require(checks):
 
 def _dataset_uris(bucket, keys):
     return [lake.s3_uri(bucket, key) for key in keys]
+
+
+def _checksums_match_objects(s3, bucket, objects, checksums):
+    if (
+        not isinstance(objects, list)
+        or not objects
+        or len(objects) != len(set(objects))
+        or not isinstance(checksums, dict)
+        or set(objects) != set(checksums)
+    ):
+        return False
+    return all(
+        lake.sha256_hex(lake.read_bytes(s3, bucket, key)) == checksums[key]
+        for key in objects
+    )
 
 
 def gold_pointer_contract(pointer):
@@ -187,15 +204,18 @@ def validate_silver(s3, config, pointer=None):
                 observed=observed,
             )
         )
-        for key, digest in info["checksums"].items():
-            checks.append(
-                check(
-                    f"silver.{dataset}.checksum",
-                    lake.sha256_hex(lake.read_bytes(s3, config.silver_bucket, key))
-                    == digest,
-                    object=key,
-                )
+        checks.append(
+            check(
+                f"silver.{dataset}.checksum",
+                _checksums_match_objects(
+                    s3,
+                    config.silver_bucket,
+                    info["objects"] + info["rejected_objects"],
+                    info["checksums"],
+                ),
+                objects=len(info["objects"]) + len(info["rejected_objects"]),
             )
+        )
         primary_key = PRIMARY_KEYS[dataset]
         total, distinct = connection.execute(
             f"SELECT count(*), count(DISTINCT {primary_key}) FROM read_parquet(?::VARCHAR[], union_by_name=true)",
@@ -268,6 +288,60 @@ def validate_silver(s3, config, pointer=None):
     return checks
 
 
+def silver_snapshot_entries(pointer):
+    entries = {}
+    for dataset, info in pointer["datasets"].items():
+        objects = info["objects"]
+        rejected_objects = info["rejected_objects"]
+        checksums = info["checksums"]
+        entries[dataset] = {
+            **info,
+            "checksums": {
+                key: digest for key, digest in checksums.items() if key in objects
+            },
+        }
+        entries[f"{dataset}.rejected"] = {
+            "objects": rejected_objects,
+            "row_count": info["rejected_count"],
+            "checksums": {
+                key: digest
+                for key, digest in checksums.items()
+                if key in rejected_objects
+            },
+        }
+    return entries
+
+
+def verify_snapshot_objects(s3, config, bucket, entries, prefix):
+    connection = connect(config)
+    try:
+        checks = []
+        for name, info in entries.items():
+            objects = info.get("objects", [])
+            uris = _dataset_uris(bucket, objects)
+            observed = _read_count(connection, uris) if uris else 0
+            checks.append(
+                check(
+                    f"{prefix}.{name}.row_count",
+                    observed == info["row_count"],
+                    expected=info["row_count"],
+                    observed=observed,
+                )
+            )
+            checks.append(
+                check(
+                    f"{prefix}.{name}.checksums",
+                    _checksums_match_objects(
+                        s3, bucket, objects, info.get("checksums", {})
+                    ),
+                    objects=len(objects),
+                )
+            )
+        return checks
+    finally:
+        connection.close()
+
+
 def _read_count(connection, uris, predicate=None):
     query = (
         "SELECT count(*) FROM read_parquet(?::VARCHAR[], union_by_name=true)"
@@ -305,9 +379,8 @@ def _trend_seed_checks(connection, config, s3, pointer, silver_pointer, bounds):
     checks.append(
         check(
             "gold.revenue_trend_seed.checksums",
-            all(
-                lake.sha256_hex(lake.read_bytes(s3, config.gold_bucket, key)) == digest
-                for key, digest in seed["checksums"].items()
+            _checksums_match_objects(
+                s3, config.gold_bucket, seed["objects"], seed["checksums"]
             ),
             objects=len(seed["objects"]),
         )
@@ -364,6 +437,15 @@ def validate_gold(s3, config, pointer=None, snapshot=None, window=None):
     )
     if snapshot is None:
         return checks
+    validation = snapshot.get("validation") or {}
+    checks.append(
+        check(
+            "gold.silver_snapshot_gated",
+            validation.get("content_digest") == silver_content_digest(snapshot),
+            silver_run_id=snapshot.get("run_id"),
+            remedy=SILVER_GATE_REMEDY,
+        )
+    )
     committed_silver_run = (
         lake.committed_pointer(s3, config.silver_bucket, "silver") or {}
     ).get("run_id")
@@ -400,10 +482,8 @@ def validate_gold(s3, config, pointer=None, snapshot=None, window=None):
         checks.append(
             check(
                 f"gold.{table}.checksums",
-                all(
-                    lake.sha256_hex(lake.read_bytes(s3, config.gold_bucket, key))
-                    == digest
-                    for key, digest in info["checksums"].items()
+                _checksums_match_objects(
+                    s3, config.gold_bucket, info["objects"], info["checksums"]
                 ),
                 objects=len(info["objects"]),
             )

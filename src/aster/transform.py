@@ -20,6 +20,14 @@ TREND_LOOKBACK_DAYS = 6
 TREND_SEED_TABLE = "revenue_trend_seed"
 GOLD_STAGED_PREFIX = "gold/_staged"
 GOLD_COMMITTED_KEY = "gold/_committed.json"
+SILVER_STAGED_PREFIX = "silver/_staged"
+SILVER_COMMITTED_KEY = "silver/_committed.json"
+SILVER_GATE_REMEDY = (
+    "Committed silver has no passing validation record for its exact content; "
+    "rebuild and republish silver first: python -m aster --run-id <new-run-id> "
+    "transform-silver, then validate-silver, then publish-silver (or make transform). "
+    "Existing silver and gold objects are preserved."
+)
 PRIMARY_KEYS = {
     "customers": "customer_id",
     "subscriptions": "subscription_id",
@@ -52,6 +60,22 @@ class GoldResult:
 
 def staged_pointer_key(run_id):
     return f"{GOLD_STAGED_PREFIX}/{run_id}.json"
+
+
+def staged_silver_pointer_key(run_id):
+    return f"{SILVER_STAGED_PREFIX}/{run_id}.json"
+
+
+def silver_content(pointer):
+    return {
+        "run_id": pointer["run_id"],
+        "created_at": pointer["created_at"],
+        "datasets": pointer["datasets"],
+    }
+
+
+def silver_content_digest(pointer):
+    return lake.json_digest(silver_content(pointer))
 
 
 def backfill_pointer_key(run_id):
@@ -233,8 +257,9 @@ def build_silver(s3, config, run_id):
             "run_id": run_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "datasets": datasets,
+            "state": "staged",
         }
-        lake.put_json(s3, config.silver_bucket, "silver/_committed.json", pointer)
+        lake.put_json(s3, config.silver_bucket, staged_silver_pointer_key(run_id), pointer)
         return SilverResult(run_id=run_id, datasets=datasets, pointer=pointer)
 
 
@@ -362,8 +387,8 @@ def build_gold(s3, config, run_id, silver_pointer, window=None):
                 "checksums": checksums,
             }
             log("gold_table_written", table=table, rows=row_count, objects=len(keys))
+            hit("gold-after-table")
         trend_seed = _publish_trend_seed(s3, config, connection, run_id, window)
-        hit("gold-before-publish")
         pointer = {
             "run_id": run_id,
             "state": "staged",

@@ -228,14 +228,21 @@ def test_scenario_d_interrupted_gold_keeps_previous_commit(lake_env):
         "--run-id",
         "gold-b",
         "build-gold",
-        extra_env={"ASTER_FAULT_POINT": "gold-before-publish"},
+        extra_env={"ASTER_FAULT_POINT": "gold-after-table"},
         check=False,
     )
     assert killed.returncode == -9
+    assert lake.get_json(s3, config.gold_bucket, "gold/_staged/gold-b.json") is None
     assert lake.committed_pointer(s3, config.gold_bucket, "gold") == before_pointer
     assert metric_rows(config, s3) == before
-    partial = lake.list_keys(s3, lake_env.buckets["gold"], "gold/dim_customer/run=gold-b/")
-    assert len(partial) > 0
+    assert lake.get_json(s3, config.artifacts_bucket, "runs/gold-b/run.json") is None
+    partial = lake.list_keys(
+        s3, lake_env.buckets["gold"], "gold/dim_customer/run=gold-b/"
+    )
+    assert len(partial) == 1 and partial[0].endswith(".parquet")
+    assert lake.list_keys(
+        s3, lake_env.buckets["gold"], "gold/dim_subscription/run=gold-b/"
+    ) == []
     rerun = run_aster(config, "--run-id", "gold-c", "build-gold")
     assert json.loads(rerun.stdout)["tables"]["dim_customer"] == 100
     pipeline.run_pipeline(config, "gold-d")

@@ -31,6 +31,15 @@ def run_keys(config, s3, prefix):
     )
 
 
+def advance_silver(s3, config, run_id):
+    for name, function in (
+        ("transform_silver", pipeline.transform_silver),
+        ("validate_silver", pipeline.validate_silver_stage),
+        ("publish_silver", pipeline.publish_silver),
+    ):
+        pipeline.execute_stage(name, run_id, s3, config, function, s3, config, run_id)
+
+
 def run_gold_pointer(config, s3, run_id):
     tables = {}
     for table in GOLD_TABLES:
@@ -98,7 +107,7 @@ def test_overlapping_pipelines_serialize_and_publish_own_output(
     assert errors == []
     assert sorted(name for _, name, _, _ in stage_intervals) == sorted(
         ["extract", "validate_raw", "transform_silver", "validate_silver",
-         "build_gold", "validate_gold", "publish_run"] * 2
+         "publish_silver", "build_gold", "validate_gold", "publish_run"] * 2
     )
     for index, (run_id, name, start, end) in enumerate(stage_intervals):
         for other_run, other_name, other_start, other_end in stage_intervals[index + 1 :]:
@@ -176,16 +185,7 @@ def test_stale_gold_build_fails_validation_after_silver_advances(lake_env):
         config,
         "silver-b",
     )
-    pipeline.execute_stage(
-        "transform_silver",
-        "silver-b",
-        s3,
-        config,
-        pipeline.transform_silver,
-        s3,
-        config,
-        "silver-b",
-    )
+    advance_silver(s3, config, "silver-b")
     with pytest.raises(quality.QualityError) as failed:
         pipeline.execute_stage(
             "validate_gold",
@@ -222,16 +222,7 @@ def test_publish_is_fenced_when_silver_advances_after_validation(lake_env):
         pipeline.execute_stage(
             name, "fence-gold", s3, config, function, s3, config, "fence-gold"
         )
-    pipeline.execute_stage(
-        "transform_silver",
-        "fence-new-silver",
-        s3,
-        config,
-        pipeline.transform_silver,
-        s3,
-        config,
-        "fence-new-silver",
-    )
+    advance_silver(s3, config, "fence-new-silver")
     with pytest.raises(ValueError, match="built gold from silver run fence-silver"):
         pipeline.publish(s3, config, "fence-gold")
     assert lake.committed_pointer(s3, config.gold_bucket, "gold") == committed

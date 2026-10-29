@@ -61,6 +61,11 @@ with DAG(
         bash_command=aster("validate-silver"),
         append_env=True,
     )
+    publish_silver = BashOperator(
+        task_id="publish_silver",
+        bash_command=aster("publish-silver"),
+        append_env=True,
+    )
     build_gold = BashOperator(
         task_id="build_gold",
         bash_command=gold_command(),
@@ -82,6 +87,7 @@ with DAG(
         >> validate_raw
         >> transform_silver
         >> validate_silver
+        >> publish_silver
         >> build_gold
         >> validate_gold
         >> publish_run

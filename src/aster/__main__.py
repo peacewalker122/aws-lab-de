@@ -98,9 +98,21 @@ def dispatch_stage(args, config, run_id, s3):
             run_id,
             s3,
             config,
-            pipeline.validate_silver,
+            pipeline.validate_silver_stage,
             s3,
             config,
+            run_id,
+        )
+    if args.command == "publish-silver":
+        return pipeline.execute_stage(
+            "publish_silver",
+            run_id,
+            s3,
+            config,
+            pipeline.publish_silver,
+            s3,
+            config,
+            run_id,
         )
     if args.command == "build-gold":
         window = pipeline.parse_window(args.start, args.end) if args.start else None
@@ -150,6 +162,7 @@ def build_parser():
         "validate-raw",
         "transform-silver",
         "validate-silver",
+        "publish-silver",
         "validate-gold",
         "publish-run",
     ):

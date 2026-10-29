@@ -31,7 +31,7 @@ Grafana: `http://127.0.0.1:3000`, user `admin`, password from `.env`. Provisione
 ## What the pipeline sends
 
 - Loki: every structured JSON log line is pushed to `/loki/api/v1/push` with labels `app=aster`, `service` and `run_id`.
-- Tempo: OpenTelemetry spans per stage (`extract`, `validate_raw`, `transform_silver`, `validate_silver`, `build_gold`, `validate_gold`, `publish_run`) over OTLP HTTP to `/v1/traces`.
+- Tempo: OpenTelemetry spans per stage (`extract`, `validate_raw`, `transform_silver`, `validate_silver`, `publish_silver`, `build_gold`, `validate_gold`, `publish_run`) over OTLP HTTP to `/v1/traces`.
 - Prometheus: after publication, the pipeline deletes the previous `job=aster_pipeline` group in the Pushgateway and pushes `aster_rows_extracted`, `aster_rows_silver`, `aster_rows_rejected`, `aster_rows_gold`, `aster_run_duration_ms` and `aster_run_success` labelled with the run id. The Pushgateway therefore holds only the most recent run, which matches the dashboard's "latest run" panels.
 
 Observability is best effort: an unreachable backend logs a warning and does not fail a data run. The tests assert delivery when the stack is running, so a silent failure cannot pass the suite.

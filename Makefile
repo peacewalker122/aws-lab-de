@@ -41,6 +41,7 @@ ingest:
 transform:
 	@set -a; . ./.env; set +a; $(UVENV) python -m aster $(RUN) transform-silver
 	@set -a; . ./.env; set +a; $(UVENV) python -m aster $(RUN) validate-silver
+	@set -a; . ./.env; set +a; $(UVENV) python -m aster $(RUN) publish-silver
 	@set -a; . ./.env; set +a; $(UVENV) python -m aster $(RUN) build-gold
 	@set -a; . ./.env; set +a; $(UVENV) python -m aster $(RUN) validate-gold
 

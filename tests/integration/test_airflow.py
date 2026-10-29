@@ -66,12 +66,13 @@ def airflow(config, *arguments, check=True):
 
 
 def require_airflow():
+    project = os.environ.get("COMPOSE_PROJECT_NAME", "infrastructure")
     running = subprocess.run(
         [
             "docker",
             "ps",
             "--filter",
-            "name=infrastructure_airflow-scheduler_1",
+            f"name={project}_airflow-scheduler_1",
             "--filter",
             "status=running",
             "--format",
@@ -135,6 +136,7 @@ def test_airflow_run_completes_in_isolated_schema_and_buckets(lake_env):
     assert sorted(artifact["stages"]) == [
         "build_gold",
         "extract",
+        "publish_silver",
         "transform_silver",
         "validate_gold",
         "validate_raw",
@@ -198,6 +200,7 @@ def test_gold_quality_gate_blocks_staged_output_in_airflow(lake_env):
     for command in (
         ("transform-silver",),
         ("validate-silver",),
+        ("publish-silver",),
         ("build-gold",),
     ):
         airflow(config, "python", "-m", "aster", "--run-id", run_id, *command)
