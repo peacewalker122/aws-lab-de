@@ -35,6 +35,91 @@ services:
       retries: 30
       start_period: 10s
 
+  airflow:
+    image: localhost/aster-airflow:3.1.0
+    profiles: ["airflow"]
+    build:
+      context: ..
+      dockerfile: infrastructure/airflow/Dockerfile
+    env_file:
+      - ../.env
+    environment: &airflow-environment
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:Admin
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_passwords.json
+      AIRFLOW__CORE__PARALLELISM: "4"
+      AIRFLOW__CORE__DAG_CONCURRENCY: "2"
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: "1"
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "15"
+      PYTHONPATH: /opt/aster/src
+      POSTGRES_HOST: postgres
+      AWS_ENDPOINT_URL: http://ministack:4566
+      ASTER_LOKI_URL: ""
+      ASTER_OTLP_ENDPOINT: ""
+      ASTER_PUSHGATEWAY_URL: ""
+    volumes: &airflow-volumes
+      - ../orchestration/dags:/opt/airflow/dags:ro
+      - ../src:/opt/aster/src:ro
+      - ../sql:/opt/aster/sql:ro
+    security_opt:
+      - label=disable
+  airflow-init:
+    image: localhost/aster-airflow:3.1.0
+    profiles: ["airflow"]
+    env_file:
+      - ../.env
+    environment: *airflow-environment
+    volumes: *airflow-volumes
+    security_opt:
+      - label=disable
+    entrypoint: ["/opt/aster/entrypoint.sh"]
+    command: ["init"]
+
+  airflow-api-server:
+    image: localhost/aster-airflow:3.1.0
+    profiles: ["airflow"]
+    env_file:
+      - ../.env
+    environment: *airflow-environment
+    volumes: *airflow-volumes
+    security_opt:
+      - label=disable
+    ports:
+      - "127.0.0.1:8080:8080"
+    entrypoint: ["/opt/aster/entrypoint.sh"]
+    command: ["api-server"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v2/monitor/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+
+  airflow-scheduler:
+    image: localhost/aster-airflow:3.1.0
+    profiles: ["airflow"]
+    env_file:
+      - ../.env
+    environment: *airflow-environment
+    volumes: *airflow-volumes
+    security_opt:
+      - label=disable
+    entrypoint: ["/opt/aster/entrypoint.sh"]
+    command: ["scheduler"]
+
+  airflow-dag-processor:
+    image: localhost/aster-airflow:3.1.0
+    profiles: ["airflow"]
+    env_file:
+      - ../.env
+    environment: *airflow-environment
+    volumes: *airflow-volumes
+    security_opt:
+      - label=disable
+    entrypoint: ["/opt/aster/entrypoint.sh"]
+    command: ["dag-processor"]
 
 volumes:
   postgres-data:

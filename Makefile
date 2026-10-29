@@ -4,7 +4,7 @@ RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 RUN = --run-id $(RUN_ID)
 UVENV = PYTHONPATH=src uv run --locked
 
-.PHONY: doctor up down infra-init infra-plan infra-apply migrate seed ingest transform pipeline query validate test test-integration athena clean
+.PHONY: doctor up down infra-init infra-plan infra-apply migrate seed ingest transform pipeline query validate test test-integration athena airflow-build airflow-up airflow-down airflow-run test-airflow clean
 
 doctor:
 	@command -v docker >/dev/null && docker compose version >/dev/null
@@ -61,6 +61,22 @@ test-integration:
 
 athena:
 	@set -a; . ./.env; set +a; uv run --locked python scripts/athena_probe.py
+
+airflow-build:
+	docker build -f infrastructure/airflow/Dockerfile -t localhost/aster-airflow:3.1.0 .
+
+airflow-up: airflow-build
+	$(COMPOSE) --profile airflow run --rm airflow-init
+	$(COMPOSE) --profile airflow up -d airflow-api-server airflow-scheduler airflow-dag-processor
+
+airflow-down:
+	-$(COMPOSE) --profile airflow stop airflow-api-server airflow-scheduler airflow-dag-processor
+
+airflow-run:
+	@$(COMPOSE) --profile airflow exec -T airflow-scheduler bash -c 'export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="postgresql+psycopg2://aster:$$POSTGRES_PASSWORD@postgres:5432/airflow"; airflow dags test aster_pipeline $${AIRFLOW_LOGICAL_DATE:-2025-01-01}'
+
+test-airflow:
+	@set -a; . ./.env; set +a; uv run --locked pytest -m airflow
 
 clean:
 	@echo 'Destructive: deletes PostgreSQL and MiniStack volumes and all local data. Terraform state is retained.'

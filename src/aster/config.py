@@ -4,14 +4,25 @@ from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 
+LOCAL_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "ministack",
+    "postgres",
+    "loki",
+    "tempo",
+    "pushgateway",
+    "grafana",
+}
+
+
 def _local_http_endpoint(value, variable):
     parsed = urlsplit(value)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in {"localhost", "127.0.0.1"}
-        or not parsed.port
-    ):
-        raise ValueError(f"{variable} must be a loopback HTTP URL with a port")
+    if parsed.scheme != "http" or parsed.hostname not in LOCAL_HOSTS or not parsed.port:
+        raise ValueError(
+            f"{variable} must be an HTTP URL on a loopback host or a local service name with a port"
+        )
     return value
 
 

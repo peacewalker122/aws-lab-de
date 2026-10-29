@@ -56,8 +56,15 @@ def validate_raw(s3, config, connection):
     warehouse = connect(config)
     for dataset in SILVER_DATASETS:
         manifests = lake.raw_manifests(s3, config.raw_bucket, dataset)
+        source_rows = connection.execute(
+            f"SELECT count(*) FROM {dataset}"
+        ).fetchone()[0]
         checks.append(
-            check(f"raw.{dataset}.manifests_present", bool(manifests), count=len(manifests))
+            check(
+                f"raw.{dataset}.manifests_present",
+                bool(manifests) or source_rows == 0,
+                count=len(manifests),
+            )
         )
         for manifest in manifests:
             key = manifest["objects"][0]["key"]
@@ -86,18 +93,19 @@ def validate_raw(s3, config, connection):
                 count=len(manifests),
             )
         )
-        source_rows = connection.execute(
-            f"SELECT count(*) FROM {dataset}"
-        ).fetchone()[0]
         manifested = sum(item["record_count"] for item in manifests)
         uris = [
             lake.s3_uri(config.raw_bucket, item["key"])
             for manifest in manifests
             for item in manifest["objects"]
         ]
-        distinct = warehouse.execute(
-            f"SELECT count(DISTINCT {PRIMARY_KEYS[dataset]}) FROM read_parquet([{sql_list(uris)}], union_by_name=true)"
-        ).fetchone()[0]
+        distinct = (
+            warehouse.execute(
+                f"SELECT count(DISTINCT {PRIMARY_KEYS[dataset]}) FROM read_parquet([{sql_list(uris)}], union_by_name=true)"
+            ).fetchone()[0]
+            if uris
+            else 0
+        )
         if dataset == "service_events":
             checks.append(
                 check(

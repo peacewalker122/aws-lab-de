@@ -1,6 +1,6 @@
 # Aster Data Platform
 
-Aster is a local AWS-compatible proof of concept for a fictional telecom/SaaS business. Incremental ingestion, silver/gold Parquet modeling, eight DuckDB analytical metrics, and quality gates are implemented and tested. Airflow orchestration, the reliability failure suite, and monitoring are not implemented yet. See [project.md](project.md) for requirements and milestones.
+Aster is a local AWS-compatible proof of concept for a fictional telecom/SaaS business. Incremental ingestion, silver/gold Parquet modeling, eight DuckDB analytical metrics, quality gates, and Airflow orchestration are implemented and tested. The reliability failure suite and monitoring stack are not implemented yet. See [project.md](project.md) for requirements and milestones.
 
 ## Prerequisites
 
@@ -49,6 +49,12 @@ Source triggers assign monotonically increasing cursor timestamps using a transa
 Silver writes deduplicated, validated Parquet per dataset with quarantined rejects and checksums. Gold writes `dim_customer`, `dim_subscription`, `fact_payments`, and `fact_service_events`; facts are partitioned by month and published through `gold/_committed.json` after all objects verify. Previous committed runs stay readable, so an interrupted build cannot corrupt the current dataset. Run summaries and all eight metric results are written to `s3://aster-local-artifacts/runs/<run-id>/`. Metric definitions, attribution rules, and quality gates are documented in [docs/metrics.md](docs/metrics.md).
 
 `make query` prints the eight metrics from the committed gold dataset with DuckDB reading Parquet directly from MiniStack. Metric SQL lives in `sql/analytics/` and is exercised against hand-computed fixtures in `tests/unit/test_metrics_fixtures.py`.
+
+## Orchestration
+
+`make airflow-up` builds the pinned Airflow image, initializes the `airflow` database and metadata (never dropping existing data), and starts the API server, scheduler, and DAG processor on loopback. The UI listens at `http://127.0.0.1:8080`; the admin password is `AIRFLOW_ADMIN_PASSWORD` from `.env` and user `admin`. `make airflow-run` executes the DAG with `airflow dags test`, and `make test-airflow` asserts registration, a successful run, and failure propagation.
+
+The DAG runs `extract_sources → validate_raw → transform_silver → validate_silver → build_gold → validate_gold → publish_run`, with two retries per task. A failing validation stops the chain before publication and the DAG run is marked failed. For a windowed backfill pass `--conf '{"window_start": "2025-03-01", "window_end": "2025-03-31"}'`; the windowed gold dataset is written under `gold/backfills/<run-id>/` and is deliberately not promoted to `gold/_committed.json`.
 
 ## Lifecycle and reset
 
