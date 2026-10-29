@@ -36,6 +36,23 @@ def metric_rows(config, s3, pointer=None):
         connection.close()
 
 
+def metric_artifact(config, s3, pointer=None):
+    connection = metrics.duckdb_connect(config)
+    try:
+        metrics.create_gold_views(connection, s3, config, pointer)
+        return json.loads(
+            json.dumps(
+                {
+                    name: metrics.run_metric(connection, name)
+                    for name in metrics.METRICS
+                },
+                default=str,
+            )
+        )
+    finally:
+        connection.close()
+
+
 def raw_keys(s3, bucket):
     return sorted(lake.list_keys(s3, bucket, ""))
 
@@ -310,6 +327,13 @@ def test_scenario_e_backfill_matches_clean_rebuild(lake_env):
         assert sorted(observed) == sorted(metrics.METRICS)
         for name in metrics.METRICS:
             assert observed[name] == reference[name], (name, run_id)
+        published = lake.get_json(
+            s3, config.artifacts_bucket, f"runs/{run_id}/metrics.json"
+        )
+        assert published == metric_artifact(config, s3, pointer)
+        artifact = lake.get_json(s3, config.artifacts_bucket, f"runs/{run_id}/run.json")
+        assert artifact["status"] == "success"
+        assert artifact["gold_pointer"] == f"gold/backfills/{run_id}/manifest.json"
         expected_dates = [
             (start + timedelta(days=offset)).isoformat()
             for offset in range((end - start).days + 1)

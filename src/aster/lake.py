@@ -82,7 +82,7 @@ def parse_instant(value):
 
 def cursor_end(manifest):
     timestamp, identifier = manifest["cursor"]["end"]
-    return (datetime.fromisoformat(timestamp).astimezone(timezone.utc), identifier)
+    return (parse_instant(timestamp), identifier)
 
 
 def raw_manifests(s3, bucket, dataset):

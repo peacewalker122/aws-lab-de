@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from aster import lake
 
 
@@ -29,3 +31,15 @@ def test_cursor_ties_break_on_identifier_across_offsets():
     left = manifest("2024-06-01T03:00:00+03:00", "a")
     right = manifest("2024-06-01T00:00:00+00:00", "b")
     assert lake.cursor_end(left) < lake.cursor_end(right)
+
+
+def test_cursor_end_rejects_naive_timestamps():
+    with pytest.raises(ValueError, match="no UTC offset"):
+        lake.cursor_end(manifest("2024-06-01T00:00:00"))
+    with pytest.raises(ValueError, match="no UTC offset"):
+        lake.cursor_end(manifest("2024-06-01 00:00:00"))
+
+
+def test_cursor_end_rejects_timestamps_that_are_not_instants():
+    with pytest.raises(ValueError):
+        lake.cursor_end(manifest("2024-06-01"))

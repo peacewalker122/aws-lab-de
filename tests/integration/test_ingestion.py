@@ -326,3 +326,69 @@ def test_manifest_cursors_stay_ordered_for_non_utc_source_sessions(lake_env):
     assert {
         item.name for item in checks if not item.ok
     } == set()
+
+
+def test_manifest_listing_is_scoped_to_one_dataset_prefix(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    with connect(config) as connection:
+        ingest(connection, s3, config, "prefix-1")
+    customers = lake.raw_manifests(s3, config.raw_bucket, "customers")
+    assert len(customers) == 1
+    archived_key = (
+        "customers_archive/ingest_date=2026-01-01/batch=archive/manifest.json"
+    )
+    lake.put_json(
+        s3,
+        config.raw_bucket,
+        archived_key,
+        {
+            "dataset": "customers_archive",
+            "status": "complete",
+            "record_count": 1,
+            "objects": [],
+            "cursor": {
+                "column": "updated_at",
+                "start": ["2026-01-01T00:00:00+00:00", "a"],
+                "end": ["2026-01-01T00:00:00+00:00", "b"],
+            },
+        },
+    )
+    keys = lake.list_keys(s3, config.raw_bucket, "customers/")
+    assert len(keys) == 2
+    assert all(key.startswith("customers/ingest_date=") for key in keys)
+    assert archived_key not in keys
+    assert lake.raw_manifests(s3, config.raw_bucket, "customers") == customers
+    assert lake.raw_manifests(s3, config.raw_bucket, "payments")[0]["dataset"] == (
+        "payments"
+    )
+    assert lake.list_keys(s3, config.raw_bucket, "customers_archive/") == [
+        archived_key
+    ]
+
+
+def test_naive_manifest_cursor_is_rejected(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    with connect(config) as connection:
+        ingest(connection, s3, config, "naive-1")
+    manifest = lake.raw_manifests(s3, config.raw_bucket, "customers")[0]
+    naive = {
+        **manifest,
+        "batch_id": "naive-batch",
+        "cursor": {
+            **manifest["cursor"],
+            "end": ["2026-01-01 00:00:00", manifest["cursor"]["end"][1]],
+        },
+    }
+    lake.put_json(
+        s3,
+        config.raw_bucket,
+        "customers/ingest_date=2026-01-01/batch=naive/manifest.json",
+        naive,
+    )
+    with pytest.raises(ValueError, match="no UTC offset"):
+        lake.raw_manifests(s3, config.raw_bucket, "customers")
+    with pipeline.connect_postgres(config) as connection:
+        with pytest.raises(ValueError, match="no UTC offset"):
+            quality.validate_raw(s3, config, connection)
