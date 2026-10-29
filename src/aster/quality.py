@@ -314,14 +314,39 @@ def _trend_seed_checks(connection, config, s3, pointer, silver_pointer, bounds):
     return checks
 
 
-def validate_gold(s3, config, pointer=None, silver_pointer=None, window=None):
+def validate_gold(s3, config, pointer=None, snapshot=None, window=None):
     pointer = pointer or lake.committed_pointer(s3, config.gold_bucket, "gold")
-    silver_pointer = silver_pointer or lake.committed_pointer(
-        s3, config.silver_bucket, "silver"
-    )
     checks = [check("gold.committed_pointer", pointer is not None)]
-    if pointer is None or silver_pointer is None:
+    if pointer is None:
         return checks
+    snapshot = snapshot or pointer.get("silver")
+    if snapshot is None:
+        snapshot = lake.committed_pointer(s3, config.silver_bucket, "silver")
+    checks.append(
+        check(
+            "gold.silver_snapshot",
+            snapshot is not None,
+            silver_run_id=pointer.get("silver_run_id"),
+            embedded=pointer.get("silver") is not None,
+        )
+    )
+    if snapshot is None:
+        return checks
+    committed_silver_run = (
+        lake.committed_pointer(s3, config.silver_bucket, "silver") or {}
+    ).get("run_id")
+    checks.append(
+        check(
+            "gold.silver_snapshot_current",
+            committed_silver_run == snapshot.get("run_id"),
+            gold_silver_run=snapshot.get("run_id"),
+            committed_silver_run=committed_silver_run,
+            remedy=(
+                "Gold was built from an older silver snapshot; rebuild gold from the "
+                "committed silver run and validate the new output"
+            ),
+        )
+    )
     window = tuple(date.fromisoformat(str(value)) for value in window or pointer.get("window") or ())
     bounds = window_bounds(*window) if window else None
     connection = connect(config)
@@ -352,17 +377,17 @@ def validate_gold(s3, config, pointer=None, silver_pointer=None, window=None):
             )
         )
     expected = {
-        "dim_customer": silver_pointer["datasets"]["customers"]["row_count"],
-        "dim_subscription": silver_pointer["datasets"]["subscriptions"]["row_count"],
-        "fact_payments": silver_pointer["datasets"]["payments"]["row_count"],
-        "fact_service_events": silver_pointer["datasets"]["service_events"]["row_count"],
+        "dim_customer": snapshot["datasets"]["customers"]["row_count"],
+        "dim_subscription": snapshot["datasets"]["subscriptions"]["row_count"],
+        "fact_payments": snapshot["datasets"]["payments"]["row_count"],
+        "fact_service_events": snapshot["datasets"]["service_events"]["row_count"],
     }
     if bounds:
         expected["fact_payments"] = _windowed_silver_rows(
-            connection, config, silver_pointer, "payments", "paid_at", bounds
+            connection, config, snapshot, "payments", "paid_at", bounds
         )
         expected["fact_service_events"] = _windowed_silver_rows(
-            connection, config, silver_pointer, "service_events", "event_time", bounds
+            connection, config, snapshot, "service_events", "event_time", bounds
         )
     for table, rows in expected.items():
         checks.append(
@@ -375,7 +400,7 @@ def validate_gold(s3, config, pointer=None, silver_pointer=None, window=None):
             )
         )
     checks.extend(
-        _trend_seed_checks(connection, config, s3, pointer, silver_pointer, bounds)
+        _trend_seed_checks(connection, config, s3, pointer, snapshot, bounds)
     )
     for table, key in (("dim_customer", "customer_key"), ("dim_subscription", "subscription_key")):
         uris = _dataset_uris(config.gold_bucket, pointer["tables"][table]["objects"])

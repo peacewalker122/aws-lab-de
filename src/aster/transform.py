@@ -369,6 +369,7 @@ def build_gold(s3, config, run_id, silver_pointer, window=None):
             "state": "staged",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "silver_run_id": silver_pointer["run_id"],
+            "silver": silver_pointer,
             "window": [window[0].isoformat(), window[1].isoformat()]
             if window
             else None,

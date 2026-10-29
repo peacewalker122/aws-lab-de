@@ -1,8 +1,9 @@
 import io
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
@@ -67,6 +68,109 @@ def payment_window(config, s3):
 
 def staged_pointer(config, s3, run_id):
     return lake.get_json(s3, config.gold_bucket, f"gold/_staged/{run_id}.json")
+
+
+def test_gold_validates_against_the_silver_snapshot_it_was_built_from(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    pipeline.run_pipeline(config, "snap-a")
+    committed = lake.committed_pointer(s3, config.gold_bucket, "gold")
+    pipeline.execute_stage(
+        "build_gold", "snap-b", s3, config, pipeline.make_gold, s3, config, "snap-b"
+    )
+    pointer = staged_pointer(config, s3, "snap-b")
+    assert pointer["silver_run_id"] == "snap-a"
+    assert pointer["silver"]["run_id"] == "snap-a"
+    modified = rewrite_silver_payments(config, s3, "snap-silver-2")
+    assert modified["datasets"]["payments"]["row_count"] == (
+        pointer["silver"]["datasets"]["payments"]["row_count"]
+    )
+    assert payments_total(config, s3, modified) != payments_total(
+        config, s3, pointer["silver"]
+    )
+
+    checks = {
+        item.name: item
+        for item in quality.validate_gold(s3, config, pointer=pointer)
+    }
+    assert checks["gold.silver_snapshot"].ok
+    assert checks["gold.fact_payments.silver_reconciliation"].ok
+    assert not checks["gold.silver_snapshot_current"].ok
+    assert checks["gold.silver_snapshot_current"].detail["gold_silver_run"] == "snap-a"
+    assert (
+        checks["gold.silver_snapshot_current"].detail["committed_silver_run"]
+        == "snap-silver-2"
+    )
+
+    with pytest.raises(quality.QualityError) as failed:
+        pipeline.execute_stage(
+            "validate_gold",
+            "snap-b",
+            s3,
+            config,
+            pipeline.validate_gold_stage,
+            s3,
+            config,
+            "snap-b",
+        )
+    failing = {item.name for item in failed.value.checks if not item.ok}
+    assert failing == {"gold.silver_snapshot_current"}
+    with pytest.raises(ValueError, match="no passing gold validation"):
+        pipeline.publish(s3, config, "snap-b")
+    assert lake.committed_pointer(s3, config.gold_bucket, "gold") == committed
+    assert payments_total(config, s3, committed["silver"]) != payments_total(
+        config, s3, modified
+    )
+
+
+def rewrite_silver_payments(config, s3, run_id):
+    pointer = lake.committed_pointer(s3, config.silver_bucket, "silver")
+    info = pointer["datasets"]["payments"]
+    source = lake.read_bytes(s3, config.silver_bucket, info["objects"][0])
+    table = pq.read_table(io.BytesIO(source))
+    amount = table.column("amount")
+    modified = table.set_column(
+        table.schema.get_field_index("amount"),
+        "amount",
+        pc.add(amount, pa.scalar(1, type=amount.type)),
+    )
+    buffer = io.BytesIO()
+    pq.write_table(modified, buffer, compression="zstd")
+    body = buffer.getvalue()
+    key = f"silver/payments/run={run_id}/data.parquet"
+    s3.put_object(Bucket=config.silver_bucket, Key=key, Body=body)
+    datasets = dict(pointer["datasets"])
+    datasets["payments"] = {
+        **info,
+        "objects": [key],
+        "checksums": {key: lake.sha256_hex(body)},
+    }
+    rewritten = {
+        **pointer,
+        "run_id": run_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "datasets": datasets,
+    }
+    lake.put_json(s3, config.silver_bucket, "silver/_committed.json", rewritten)
+    return rewritten
+
+
+def payments_total(config, s3, pointer):
+    connection = metrics.duckdb_connect(config)
+    try:
+        connection.execute(
+            "CREATE OR REPLACE VIEW silver_payments AS SELECT * FROM read_parquet(["
+            + ", ".join(
+                f"'{lake.s3_uri(config.silver_bucket, key)}'"
+                for key in pointer["datasets"]["payments"]["objects"]
+            )
+            + "], union_by_name=true)"
+        )
+        return connection.execute("SELECT sum(amount) FROM silver_payments").fetchone()[
+            0
+        ]
+    finally:
+        connection.close()
 
 
 def test_build_gold_stages_without_moving_the_committed_pointer(lake_env):

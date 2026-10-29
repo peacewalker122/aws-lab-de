@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from aster import lake, metrics, pipeline
+from aster import lake, metrics, pipeline, quality
 from aster.source import migrate, seed
 
 pytestmark = pytest.mark.integration
@@ -162,7 +162,7 @@ def test_publish_refuses_a_run_that_lost_the_publication_race(lake_env):
     )
 
 
-def test_publish_refuses_gold_built_from_another_silver_run(lake_env):
+def test_stale_gold_build_fails_validation_after_silver_advances(lake_env):
     config, s3 = lake_env.config, lake_env.s3
     seeded(config)
     pipeline.run_pipeline(config, "silver-a")
@@ -186,18 +186,55 @@ def test_publish_refuses_gold_built_from_another_silver_run(lake_env):
         config,
         "silver-b",
     )
-    pipeline.execute_stage(
-        "validate_gold",
-        "silver-b",
-        s3,
-        config,
-        pipeline.validate_gold_stage,
-        s3,
-        config,
-        "silver-b",
-    )
-    with pytest.raises(ValueError, match="built gold from silver run silver-a"):
+    with pytest.raises(quality.QualityError) as failed:
+        pipeline.execute_stage(
+            "validate_gold",
+            "silver-b",
+            s3,
+            config,
+            pipeline.validate_gold_stage,
+            s3,
+            config,
+            "silver-b",
+        )
+    assert {item.name for item in failed.value.checks if not item.ok} == {
+        "gold.silver_snapshot_current"
+    }
+    with pytest.raises(ValueError, match="no passing gold validation"):
         pipeline.publish(s3, config, "silver-b")
     assert (
         lake.get_json(s3, config.artifacts_bucket, "runs/silver-b/run.json") is None
+    )
+    assert (
+        lake.committed_pointer(s3, config.gold_bucket, "gold")["run_id"] == "silver-a"
+    )
+
+
+def test_publish_is_fenced_when_silver_advances_after_validation(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    pipeline.run_pipeline(config, "fence-silver")
+    committed = lake.committed_pointer(s3, config.gold_bucket, "gold")
+    for name, function in (
+        ("build_gold", pipeline.make_gold),
+        ("validate_gold", pipeline.validate_gold_stage),
+    ):
+        pipeline.execute_stage(
+            name, "fence-gold", s3, config, function, s3, config, "fence-gold"
+        )
+    pipeline.execute_stage(
+        "transform_silver",
+        "fence-new-silver",
+        s3,
+        config,
+        pipeline.transform_silver,
+        s3,
+        config,
+        "fence-new-silver",
+    )
+    with pytest.raises(ValueError, match="built gold from silver run fence-silver"):
+        pipeline.publish(s3, config, "fence-gold")
+    assert lake.committed_pointer(s3, config.gold_bucket, "gold") == committed
+    assert (
+        lake.get_json(s3, config.artifacts_bucket, "runs/fence-gold/run.json") is None
     )
