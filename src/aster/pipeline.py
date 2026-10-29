@@ -129,9 +129,7 @@ def validate_gold_stage(s3, config, run_id):
         if window
         else None
     )
-    checks = quality.validate_gold(
-        s3, config, pointer=pointer, windowed=bool(window)
-    )
+    checks = quality.validate_gold(s3, config, pointer=pointer, window=window)
     quality.require(checks)
     obs.log("gold_validated", checks=[check.as_dict() for check in checks])
     return {"checks": [check.as_dict() for check in checks]}

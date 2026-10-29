@@ -107,11 +107,10 @@ def _publish_objects(
         lake.s3_uri(bucket, target),
         partition_by if partitioned else None,
     )
+    listing_prefix = f"{prefix}/" if partitioned else target
     keys = sorted(
         key
-        for key in lake.list_keys(
-            s3, bucket, prefix if partitioned else target
-        )
+        for key in lake.list_keys(s3, bucket, listing_prefix)
         if key.endswith(".parquet")
     )
     if not keys:

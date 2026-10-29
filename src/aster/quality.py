@@ -1,8 +1,16 @@
 import json
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 from aster import lake
-from aster.transform import PRIMARY_KEYS, SILVER_DATASETS, connect, sql_list
+from aster.transform import (
+    PRIMARY_KEYS,
+    SILVER_DATASETS,
+    TREND_LOOKBACK_DAYS,
+    connect,
+    sql_list,
+    window_bounds,
+)
 
 REQUIRED_COLUMNS = {
     "customers": ("customer_id", "name", "region", "created_at", "updated_at"),
@@ -232,7 +240,81 @@ def validate_silver(s3, config, pointer=None):
     return checks
 
 
-def validate_gold(s3, config, pointer=None, silver_pointer=None, windowed=False):
+def _read_count(connection, uris, predicate=None):
+    query = (
+        "SELECT count(*) FROM read_parquet(?::VARCHAR[], union_by_name=true)"
+    )
+    if predicate:
+        query += f" WHERE {predicate}"
+    return connection.execute(query, [uris]).fetchone()[0]
+
+
+def _windowed_silver_rows(connection, config, silver_pointer, dataset, column, bounds):
+    start, end = bounds
+    return _read_count(
+        connection,
+        _dataset_uris(config.silver_bucket, silver_pointer["datasets"][dataset]["objects"]),
+        f"{column} >= TIMESTAMP '{start.isoformat()}' "
+        f"AND {column} < TIMESTAMP '{end.isoformat()}'",
+    )
+
+
+def _trend_seed_checks(connection, config, s3, pointer, silver_pointer, bounds):
+    seed = pointer.get("trend_seed")
+    checks = [check("gold.revenue_trend_seed.present", seed is not None)]
+    if seed is None:
+        return checks
+    uris = _dataset_uris(config.gold_bucket, seed["objects"])
+    observed = _read_count(connection, uris)
+    checks.append(
+        check(
+            "gold.revenue_trend_seed.row_count",
+            observed == seed["row_count"],
+            expected=seed["row_count"],
+            observed=observed,
+        )
+    )
+    checks.append(
+        check(
+            "gold.revenue_trend_seed.checksums",
+            all(
+                lake.sha256_hex(lake.read_bytes(s3, config.gold_bucket, key)) == digest
+                for key, digest in seed["checksums"].items()
+            ),
+            objects=len(seed["objects"]),
+        )
+    )
+    if bounds is None:
+        return checks
+    start, _ = bounds
+    lookback_start = start - timedelta(days=TREND_LOOKBACK_DAYS)
+    silver_lookback = connection.execute(
+        "SELECT coalesce(sum(amount), 0) FROM read_parquet(?::VARCHAR[], union_by_name=true) "
+        f"WHERE status = 'succeeded' AND paid_at >= TIMESTAMP '{lookback_start.isoformat()}' "
+        f"AND paid_at < TIMESTAMP '{start.isoformat()}'",
+        [
+            _dataset_uris(
+                config.silver_bucket, silver_pointer["datasets"]["payments"]["objects"]
+            )
+        ],
+    ).fetchone()[0]
+    seeded_lookback = connection.execute(
+        "SELECT coalesce(sum(prior_revenue), 0) FROM read_parquet(?::VARCHAR[], union_by_name=true) "
+        "WHERE is_lookback",
+        [uris],
+    ).fetchone()[0]
+    checks.append(
+        check(
+            "gold.revenue_trend_seed.lookback_revenue",
+            seeded_lookback == silver_lookback,
+            seeded=seeded_lookback,
+            silver=silver_lookback,
+        )
+    )
+    return checks
+
+
+def validate_gold(s3, config, pointer=None, silver_pointer=None, window=None):
     pointer = pointer or lake.committed_pointer(s3, config.gold_bucket, "gold")
     silver_pointer = silver_pointer or lake.committed_pointer(
         s3, config.silver_bucket, "silver"
@@ -240,6 +322,8 @@ def validate_gold(s3, config, pointer=None, silver_pointer=None, windowed=False)
     checks = [check("gold.committed_pointer", pointer is not None)]
     if pointer is None or silver_pointer is None:
         return checks
+    window = tuple(date.fromisoformat(str(value)) for value in window or pointer.get("window") or ())
+    bounds = window_bounds(*window) if window else None
     connection = connect(config)
     for table in ("dim_customer", "dim_subscription", "fact_payments", "fact_service_events"):
         info = pointer["tables"][table]
@@ -273,17 +357,26 @@ def validate_gold(s3, config, pointer=None, silver_pointer=None, windowed=False)
         "fact_payments": silver_pointer["datasets"]["payments"]["row_count"],
         "fact_service_events": silver_pointer["datasets"]["service_events"]["row_count"],
     }
+    if bounds:
+        expected["fact_payments"] = _windowed_silver_rows(
+            connection, config, silver_pointer, "payments", "paid_at", bounds
+        )
+        expected["fact_service_events"] = _windowed_silver_rows(
+            connection, config, silver_pointer, "service_events", "event_time", bounds
+        )
     for table, rows in expected.items():
-        if windowed and table.startswith("fact_"):
-            continue
         checks.append(
             check(
                 f"gold.{table}.silver_reconciliation",
                 pointer["tables"][table]["row_count"] == rows,
                 gold_rows=pointer["tables"][table]["row_count"],
                 silver_rows=rows,
+                window=pointer.get("window"),
             )
         )
+    checks.extend(
+        _trend_seed_checks(connection, config, s3, pointer, silver_pointer, bounds)
+    )
     for table, key in (("dim_customer", "customer_key"), ("dim_subscription", "subscription_key")):
         uris = _dataset_uris(config.gold_bucket, pointer["tables"][table]["objects"])
         total, distinct = connection.execute(

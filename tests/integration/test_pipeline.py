@@ -1,6 +1,8 @@
+from datetime import date, timedelta
+
 import pytest
 
-from aster import lake, metrics, pipeline
+from aster import lake, metrics, pipeline, quality
 from aster.ingestion import ingest
 from aster.source import migrate, seed
 
@@ -24,6 +26,15 @@ def committed_metrics(config, s3, pointer=None):
             ]
             for name in metrics.METRICS
         }
+    finally:
+        connection.close()
+
+
+def connection_scalar(config, s3, query):
+    connection = metrics.duckdb_connect(config)
+    try:
+        metrics.create_gold_views(connection, s3, config)
+        return connection.execute(query).fetchone()[0]
     finally:
         connection.close()
 
@@ -78,6 +89,56 @@ def test_pipeline_publishes_all_zones_with_correct_rows(lake_env):
         float(row["revenue"]) for row in stored_metrics["revenue_by_region"]
     ) > 0
     assert len(stored_metrics["p95_service_duration_by_day"]) > 300
+
+
+def test_windowed_gold_reconciles_against_window_filtered_silver(lake_env):
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    pipeline.run_pipeline(config, "window-check-full")
+    first_day = date.fromisoformat(
+        connection_scalar(
+            config,
+            s3,
+            "SELECT CAST(min(payment_date) AS VARCHAR) FROM fact_payments "
+            "WHERE payment_status = 'succeeded' AND payment_date IS NOT NULL",
+        )
+    )
+    start = first_day + timedelta(days=30)
+    end = start + timedelta(days=10)
+    window = [start.isoformat(), end.isoformat()]
+    pipeline.run_backfill(config, "window-check", start, end)
+    pointer = lake.get_json(
+        s3, config.gold_bucket, "gold/backfills/window-check/manifest.json"
+    )
+    checks = {
+        item.name: item
+        for item in quality.validate_gold(
+            s3, config, pointer=pointer, window=window
+        )
+    }
+    payment_reconciliation = checks["gold.fact_payments.silver_reconciliation"]
+    event_reconciliation = checks["gold.fact_service_events.silver_reconciliation"]
+    assert payment_reconciliation.ok
+    assert event_reconciliation.ok
+    assert payment_reconciliation.detail["window"] == window
+    assert 0 < payment_reconciliation.detail["silver_rows"] < 100
+    assert 0 < event_reconciliation.detail["silver_rows"] < 1000
+    lookback = checks["gold.revenue_trend_seed.lookback_revenue"]
+    assert lookback.ok and lookback.detail["silver"] > 0
+    mismatch = {
+        item.name: item
+        for item in quality.validate_gold(
+            s3,
+            config,
+            pointer=pointer,
+            window=[
+                first_day.isoformat(),
+                (first_day + timedelta(days=365)).isoformat(),
+            ],
+        )
+    }
+    assert not mismatch["gold.fact_payments.silver_reconciliation"].ok
+    assert not mismatch["gold.fact_service_events.silver_reconciliation"].ok
 
 
 def test_replay_of_committed_batches_is_logically_idempotent(lake_env):
