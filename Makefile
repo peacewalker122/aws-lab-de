@@ -4,7 +4,7 @@ RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 RUN = --run-id $(RUN_ID)
 UVENV = PYTHONPATH=src uv run --locked
 
-.PHONY: doctor up down infra-init infra-plan infra-apply migrate seed ingest transform pipeline query validate test test-integration athena airflow-build airflow-up airflow-down airflow-run test-airflow clean
+.PHONY: doctor up down infra-init infra-plan infra-apply migrate seed ingest transform pipeline query validate test test-integration athena airflow-build airflow-up airflow-down airflow-run test-airflow monitoring-up monitoring-down monitoring-check test-observability test-failure lab-up clean
 
 doctor:
 	@command -v docker >/dev/null && docker compose version >/dev/null
@@ -61,6 +61,23 @@ test-integration:
 
 athena:
 	@set -a; . ./.env; set +a; uv run --locked python scripts/athena_probe.py
+
+monitoring-up:
+	$(COMPOSE) --profile observability up -d
+
+monitoring-down:
+	-$(COMPOSE) --profile observability stop loki tempo prometheus pushgateway grafana
+
+monitoring-check:
+	@set -e; for url in http://127.0.0.1:3100/ready http://127.0.0.1:3200/ready http://127.0.0.1:19090/-/ready http://127.0.0.1:9091/-/ready http://127.0.0.1:3000/api/health; do code=$$(curl -sS -m 5 -o /dev/null -w '%{http_code}' $$url); echo "$$url -> $$code"; [ "$$code" = 200 ]; done
+
+test-observability:
+	@set -a; . ./.env; set +a; uv run --locked pytest -m observability
+
+test-failure:
+	@set -a; . ./.env; set +a; uv run --locked pytest -m failure
+
+lab-up: up monitoring-up airflow-up
 
 airflow-build:
 	docker build -f infrastructure/airflow/Dockerfile -t localhost/aster-airflow:3.1.0 .

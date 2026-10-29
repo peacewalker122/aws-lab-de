@@ -35,6 +35,89 @@ services:
       retries: 30
       start_period: 10s
 
+  loki:
+    image: docker.io/grafana/loki:3.6.19
+    profiles: ["observability"]
+    security_opt:
+      - label=disable
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+
+  tempo:
+    image: docker.io/grafana/tempo:2.10.10
+    profiles: ["observability"]
+    security_opt:
+      - label=disable
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+
+  prometheus:
+    image: docker.io/prom/prometheus:v3.15.1
+    profiles: ["observability"]
+    security_opt:
+      - label=disable
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9090/-/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  pushgateway:
+    image: docker.io/prom/pushgateway:v1.11.5
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:9091:9091"
+    volumes:
+      - pushgateway-data:/data
+    command: ["--persistence.file=/data/pushgateway.data", "--persistence.interval=5m"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9091/-/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  grafana:
+    image: docker.io/grafana/grafana:13.2.5
+    profiles: ["observability"]
+    security_opt:
+      - label=disable
+    env_file:
+      - ../.env
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
   airflow:
     image: localhost/aster-airflow:3.1.0
     profiles: ["airflow"]
@@ -56,9 +139,9 @@ services:
       PYTHONPATH: /opt/aster/src
       POSTGRES_HOST: postgres
       AWS_ENDPOINT_URL: http://ministack:4566
-      ASTER_LOKI_URL: ""
-      ASTER_OTLP_ENDPOINT: ""
-      ASTER_PUSHGATEWAY_URL: ""
+      ASTER_LOKI_URL: http://loki:3100
+      ASTER_OTLP_ENDPOINT: http://tempo:4318
+      ASTER_PUSHGATEWAY_URL: http://pushgateway:9091
     volumes: &airflow-volumes
       - ../orchestration/dags:/opt/airflow/dags:ro
       - ../src:/opt/aster/src:ro
@@ -125,3 +208,8 @@ volumes:
   postgres-data:
   ministack-state:
   ministack-s3:
+  loki-data:
+  tempo-data:
+  prometheus-data:
+  pushgateway-data:
+  grafana-data:

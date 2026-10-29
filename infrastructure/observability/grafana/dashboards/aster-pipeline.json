@@ -1,0 +1,89 @@
+{
+  "uid": "aster-pipeline",
+  "title": "Aster Pipeline",
+  "tags": ["aster"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Rows extracted (latest run)",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "aster_rows_extracted", "instant": true, "range": false}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Rows rejected (latest run)",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "aster_rows_rejected", "instant": true, "range": false}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Run success (latest run)",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "aster_run_success", "instant": true, "range": false}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "failed"}, "1": {"text": "success"}}}
+          ]
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Rows in gold (latest run)",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "aster_rows_gold", "instant": true, "range": false}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Run duration (ms)",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "aster_run_duration_ms", "instant": false, "range": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 6,
+      "type": "logs",
+      "title": "Pipeline logs",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 16},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "{app=\"aster\"} | json", "queryType": "range"}],
+      "options": {"showTime": true, "sortOrder": "Descending", "wrapLogMessage": true}
+    }
+  ]
+}
