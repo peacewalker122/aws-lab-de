@@ -92,6 +92,7 @@ Independent review of M2-M5 found seven defects. Each is fixed and covered by a 
 - Pipeline serialization is a PostgreSQL advisory lock scoped to the schema. A sequence of separate stage commands releases the lock between stages; the publication fence, not the lock, prevents publishing foreign output, and a fenced run fails and must be retried.
 - Source `updated_at` and `ingested_at` are trigger-assigned commit timestamps repurposed as ingestion cursors. Writes that bypass or disable the triggers invalidate cursor guarantees; deletes are not detected; ordering is per dataset. See `docs/limitations.md`.
 - Terraform state, `.env`, and `.local/` are untracked; no credentials, state, or benchmark numbers are committed.
+- The whole suite passes when run per marker (`not integration`, integration without Airflow/observability, `airflow`, `observability`): 21 + 23 + 4 + 2 tests. A single-process run of every test on this host was interrupted once: systemd-oomd was active with swap exhausted, and MiniStack and PostgreSQL were killed mid-run, which produced connection errors rather than assertion failures. Re-running the same tests in marker-sized batches was green. This is a host memory limit, not a known data-correctness defect.
 
 ## M6: portfolio packaging
 
