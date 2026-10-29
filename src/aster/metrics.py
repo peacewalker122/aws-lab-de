@@ -7,6 +7,10 @@ ANALYTICS_SQL = Path(__file__).resolve().parents[2] / "sql/analytics"
 METRICS = tuple(sorted(path.stem for path in ANALYTICS_SQL.glob("*.sql")))
 
 
+def warehouse_connection(config):
+    return duckdb_connect(config)
+
+
 def create_gold_views(connection, s3, config, pointer=None):
     pointer = pointer or lake.committed_pointer(s3, config.gold_bucket, "gold")
     if pointer is None:

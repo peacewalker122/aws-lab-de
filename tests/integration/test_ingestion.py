@@ -82,7 +82,7 @@ def test_manifest_contract_and_checkpoint(lake_env):
         assert manifest["cursor"]["column"] == "ingested_at"
         assert manifest["cursor"]["start"] <= manifest["cursor"]["end"]
         assert manifest["objects"][0]["key"].startswith(
-            f"service_events/ingest_date="
+            "service_events/ingest_date="
         )
         payload = lake.read_bytes(s3, config.raw_bucket, manifest["objects"][0]["key"])
         assert hashlib.sha256(payload).hexdigest() == manifest["objects"][0]["sha256"]

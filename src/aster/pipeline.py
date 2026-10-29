@@ -149,7 +149,7 @@ def gold_pointer_for_run(s3, config, run_id, stages):
 def publish(s3, config, run_id, status="success"):
     stages = load_stages(s3, config, run_id)
     gold_pointer = gold_pointer_for_run(s3, config, run_id, stages)
-    connection = metrics.duckdb_connect(config)
+    connection = metrics.warehouse_connection(config)
     try:
         metrics.create_gold_views(connection, s3, config, gold_pointer)
         results = metrics.run_all(connection)

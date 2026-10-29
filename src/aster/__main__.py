@@ -39,7 +39,7 @@ def dispatch(args, config, run_id):
             seed(connection, args.size, args.seed)
         return {"size": args.size, "seed": args.seed}
     if args.command == "query":
-        connection = metrics.duckdb_connect(config)
+        connection = metrics.warehouse_connection(config)
         try:
             pointer = (
                 lake.get_json(
