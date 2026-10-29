@@ -58,7 +58,21 @@ def dispatch(args, config, run_id):
                 print(f"== {name}")
                 print(format_table(rows))
         return {"gold_run_id": pointer["run_id"], "metrics": results}
+    if args.command == "pipeline":
+        window = pipeline.parse_window(args.start, args.end) if args.start else None
+        stages = pipeline.run_pipeline(config, run_id, window)
+        return {"stages": sorted(stages)}
+    if args.command == "backfill":
+        stages = pipeline.run_backfill(
+            config, run_id, *pipeline.parse_window(args.start, args.end)
+        )
+        return {"stages": sorted(stages)}
     pipeline.prepare(config, run_id)
+    with pipeline.pipeline_lock(config):
+        return dispatch_stage(args, config, run_id, s3)
+
+
+def dispatch_stage(args, config, run_id, s3):
     if args.command == "extract":
         return pipeline.execute_stage(
             "extract", run_id, s3, config, pipeline.extract, s3, config, run_id
@@ -116,15 +130,6 @@ def dispatch(args, config, run_id):
         return pipeline.execute_stage(
             "publish_run", run_id, s3, config, pipeline.publish, s3, config, run_id
         )
-    if args.command == "pipeline":
-        window = pipeline.parse_window(args.start, args.end) if args.start else None
-        stages = pipeline.run_pipeline(config, run_id, window)
-        return {"stages": sorted(stages)}
-    if args.command == "backfill":
-        stages = pipeline.run_backfill(
-            config, run_id, *pipeline.parse_window(args.start, args.end)
-        )
-        return {"stages": sorted(stages)}
     raise ValueError(f"Unknown command {args.command}")
 
 

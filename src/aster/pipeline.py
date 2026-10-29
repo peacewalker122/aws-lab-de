@@ -1,3 +1,4 @@
+import contextlib
 import json
 import time
 import uuid
@@ -29,6 +30,21 @@ def connect_postgres(config):
         sql.SQL("SET search_path TO {}").format(sql.Identifier(config.postgres_schema))
     )
     return connection
+
+
+@contextlib.contextmanager
+def pipeline_lock(config):
+    connection = psycopg.connect(
+        **config.postgres_kwargs(), autocommit=True, connect_timeout=5
+    )
+    scope = f"aster-pipeline:{config.postgres_schema}"
+    try:
+        connection.execute("SELECT pg_advisory_lock(hashtext(%s))", (scope,))
+        obs.log("pipeline_lock_acquired", scope=scope)
+        yield
+    finally:
+        obs.log("pipeline_lock_released", scope=scope)
+        connection.close()
 
 
 def record_stage(s3, config, run_id, name, payload):
@@ -114,6 +130,7 @@ def make_gold(s3, config, run_id, window=None):
     result = build_gold(s3, config, run_id, silver_pointer, window)
     return {
         "gold_run_id": result.run_id,
+        "silver_run_id": silver_pointer["run_id"],
         "tables": {name: info["row_count"] for name, info in result.tables.items()},
         "window": list(window) if window else None,
     }
@@ -144,9 +161,35 @@ def gold_pointer_for_run(s3, config, run_id, stages):
     return lake.committed_pointer(s3, config.gold_bucket, "gold")
 
 
+def require_run_ownership(s3, config, run_id, stages):
+    build_gold_stage = stages.get("build_gold", {})
+    recorded_run = build_gold_stage.get("gold_run_id")
+    if recorded_run != run_id:
+        raise ValueError(
+            f"Run {run_id} has no gold output of its own; the build record names {recorded_run}"
+        )
+    silver_stage = stages.get("transform_silver")
+    if silver_stage and build_gold_stage.get("silver_run_id") != silver_stage.get(
+        "silver_run_id"
+    ):
+        raise ValueError(
+            f"Run {run_id} built gold from silver run "
+            f"{build_gold_stage.get('silver_run_id')} but transformed silver "
+            f"{silver_stage.get('silver_run_id')}"
+        )
+    pointer = gold_pointer_for_run(s3, config, run_id, stages)
+    owner = (pointer or {}).get("run_id")
+    if owner != run_id:
+        raise ValueError(
+            f"Committed gold output belongs to run {owner}, not {run_id}; "
+            "refusing to publish another run's dataset"
+        )
+    return pointer
+
+
 def publish(s3, config, run_id, status="success"):
     stages = load_stages(s3, config, run_id)
-    gold_pointer = gold_pointer_for_run(s3, config, run_id, stages)
+    gold_pointer = require_run_ownership(s3, config, run_id, stages)
     connection = metrics.warehouse_connection(config)
     try:
         metrics.create_gold_views(connection, s3, config, gold_pointer)
@@ -201,6 +244,11 @@ def publish(s3, config, run_id, status="success"):
 
 def run_pipeline(config, run_id, window=None):
     prepare(config, run_id)
+    with pipeline_lock(config):
+        return _run_pipeline(config, run_id, window)
+
+
+def _run_pipeline(config, run_id, window=None):
     s3 = lake.s3_client(config)
     started = datetime.now(timezone.utc)
     plan = (
@@ -256,11 +304,18 @@ def run_pipeline(config, run_id, window=None):
 
 def run_backfill(config, run_id, start, end):
     prepare(config, run_id)
-    s3 = lake.s3_client(config)
-    execute_stage("build_gold", run_id, s3, config, make_gold, s3, config, run_id, (start, end))
-    execute_stage("validate_gold", run_id, s3, config, validate_gold_stage, s3, config, run_id)
-    execute_stage("publish_run", run_id, s3, config, publish, s3, config, run_id)
-    return load_stages(s3, config, run_id)
+    with pipeline_lock(config):
+        s3 = lake.s3_client(config)
+        execute_stage(
+            "build_gold", run_id, s3, config, make_gold, s3, config, run_id, (start, end)
+        )
+        execute_stage(
+            "validate_gold", run_id, s3, config, validate_gold_stage, s3, config, run_id
+        )
+        execute_stage(
+            "publish_run", run_id, s3, config, publish, s3, config, run_id
+        )
+        return load_stages(s3, config, run_id)
 
 
 def parse_window(start, end):
