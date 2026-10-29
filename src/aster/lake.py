@@ -1,0 +1,82 @@
+import hashlib
+import json
+
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
+
+
+def s3_client(config):
+    return boto3.client(
+        "s3",
+        endpoint_url=config.endpoint,
+        region_name=config.region,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        config=BotoConfig(
+            s3={"addressing_style": "path"},
+            retries={"max_attempts": 5, "mode": "standard"},
+        ),
+    )
+
+
+def sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def put_json(s3, bucket, key, payload):
+    body = json.dumps(payload, sort_keys=True, default=str).encode()
+    s3.put_object(
+        Bucket=bucket, Key=key, Body=body, ContentType="application/json"
+    )
+    return body
+
+
+def get_json(s3, bucket, key):
+    try:
+        return json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+    except ClientError as error:
+        if error.response["Error"]["Code"] in {"NoSuchKey", "404"}:
+            return None
+        raise
+
+
+def read_bytes(s3, bucket, key):
+    return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+
+
+def list_keys(s3, bucket, prefix):
+    keys = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        keys.extend(item["Key"] for item in page.get("Contents", []))
+    return keys
+
+
+def delete_keys(s3, bucket, keys):
+    for start in range(0, len(keys), 1000):
+        chunk = keys[start : start + 1000]
+        s3.delete_objects(
+            Bucket=bucket, Delete={"Objects": [{"Key": key} for key in chunk]}
+        )
+
+
+def raw_manifests(s3, bucket, dataset):
+    prefix = f"{dataset}/"
+    manifests = [
+        json.loads(read_bytes(s3, bucket, key))
+        for key in list_keys(s3, bucket, prefix)
+        if key.endswith("/manifest.json")
+    ]
+    return sorted(
+        manifests,
+        key=lambda item: (item["cursor"]["end"][0], item["cursor"]["end"][1]),
+    )
+
+
+def s3_uri(bucket, key):
+    return f"s3://{bucket}/{key}"
+
+
+def committed_pointer(s3, bucket, zone):
+    return get_json(s3, bucket, f"{zone}/_committed.json")
