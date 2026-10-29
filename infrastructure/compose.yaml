@@ -1,11 +1,31 @@
+x-airflow-environment: &airflow-environment
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+  AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:Admin
+  AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_passwords.json
+  AIRFLOW__CORE__PARALLELISM: "4"
+  AIRFLOW__CORE__DAG_CONCURRENCY: "2"
+  AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: "1"
+  AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "15"
+  PYTHONPATH: /opt/aster/src
+  POSTGRES_HOST: postgres
+  AWS_ENDPOINT_URL: http://ministack:4566
+  ASTER_LOKI_URL: http://loki:3100
+  ASTER_OTLP_ENDPOINT: http://tempo:4318
+  ASTER_PUSHGATEWAY_URL: http://pushgateway:9091
+
+x-airflow-secrets: &airflow-secrets
+  POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+  AIRFLOW_ADMIN_PASSWORD: "${AIRFLOW_ADMIN_PASSWORD:?set AIRFLOW_ADMIN_PASSWORD in .env}"
+
 services:
   postgres:
     image: docker.io/library/postgres:16.10
-    env_file:
-      - ../.env
     environment:
       POSTGRES_USER: aster
       POSTGRES_DB: aster
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -123,24 +143,8 @@ services:
     build:
       context: ..
       dockerfile: infrastructure/airflow/Dockerfile
-    env_file:
-      - ../.env
-    environment: &airflow-environment
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:Admin
-      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_passwords.json
-      AIRFLOW__CORE__PARALLELISM: "4"
-      AIRFLOW__CORE__DAG_CONCURRENCY: "2"
-      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: "1"
-      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "15"
-      PYTHONPATH: /opt/aster/src
-      POSTGRES_HOST: postgres
-      AWS_ENDPOINT_URL: http://ministack:4566
-      ASTER_LOKI_URL: http://loki:3100
-      ASTER_OTLP_ENDPOINT: http://tempo:4318
-      ASTER_PUSHGATEWAY_URL: http://pushgateway:9091
+    environment:
+      <<: [*airflow-environment, *airflow-secrets]
     volumes: &airflow-volumes
       - ../orchestration/dags:/opt/airflow/dags:ro
       - ../src:/opt/aster/src:ro
@@ -150,9 +154,8 @@ services:
   airflow-init:
     image: localhost/aster-airflow:3.1.0
     profiles: ["airflow"]
-    env_file:
-      - ../.env
-    environment: *airflow-environment
+    environment:
+      <<: [*airflow-environment, *airflow-secrets]
     volumes: *airflow-volumes
     security_opt:
       - label=disable
@@ -162,9 +165,8 @@ services:
   airflow-api-server:
     image: localhost/aster-airflow:3.1.0
     profiles: ["airflow"]
-    env_file:
-      - ../.env
-    environment: *airflow-environment
+    environment:
+      <<: [*airflow-environment, *airflow-secrets]
     volumes: *airflow-volumes
     security_opt:
       - label=disable
@@ -182,9 +184,8 @@ services:
   airflow-scheduler:
     image: localhost/aster-airflow:3.1.0
     profiles: ["airflow"]
-    env_file:
-      - ../.env
-    environment: *airflow-environment
+    environment:
+      <<: [*airflow-environment, *airflow-secrets]
     volumes: *airflow-volumes
     security_opt:
       - label=disable
@@ -194,14 +195,14 @@ services:
   airflow-dag-processor:
     image: localhost/aster-airflow:3.1.0
     profiles: ["airflow"]
-    env_file:
-      - ../.env
-    environment: *airflow-environment
+    environment:
+      <<: [*airflow-environment, *airflow-secrets]
     volumes: *airflow-volumes
     security_opt:
       - label=disable
     entrypoint: ["/opt/aster/entrypoint.sh"]
     command: ["dag-processor"]
+
 
 volumes:
   postgres-data:
