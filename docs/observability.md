@@ -24,6 +24,8 @@ make monitoring-down     # stop the stack, keep volumes
 
 `.env` carries the loopback endpoints (`ASTER_LOKI_URL`, `ASTER_OTLP_ENDPOINT`, `ASTER_PUSHGATEWAY_URL`) and the Grafana admin password (`GF_SECURITY_ADMIN_PASSWORD`). `scripts/local_secrets.py` creates missing values with random secrets and never rewrites existing ones. Credentials stay in the untracked `.env`; no secret is committed.
 
+The Grafana container no longer reads `.env` as an environment file. Compose passes it only `GF_SECURITY_ADMIN_PASSWORD` through interpolation (`make` targets use `--env-file .env`), so the PostgreSQL password, the Airflow admin password and the Airflow metadata connection string never enter the Grafana process. Compose fails explicitly when the variable is missing instead of starting Grafana with an empty password.
+
 Grafana: `http://127.0.0.1:3000`, user `admin`, password from `.env`. Provisioned datasources are Prometheus (default), Loki and Tempo; the dashboard `Aster Pipeline` (uid `aster-pipeline`) shows the latest run's row counts, rejected rows, run success, duration and pipeline logs.
 
 ## What the pipeline sends
@@ -41,3 +43,5 @@ Loki keeps 168 hours and compacts TSDB chunks; Tempo retains 24-hour trace block
 ## Airflow
 
 Airflow tasks receive `ASTER_LOKI_URL=http://loki:3100`, `ASTER_OTLP_ENDPOINT=http://tempo:4318` and `ASTER_PUSHGATEWAY_URL=http://pushgateway:9091`, so DAG runs emit the same telemetry through the Compose network. Start the monitoring stack before running the DAG if you want telemetry from orchestrated runs.
+
+The Airflow simple-auth password file is written by the entrypoint with mode `0600`: the entrypoint sets `umask 077` and opens the file with owner-only permissions. The Airflow integration tests assert the mode inside the container.

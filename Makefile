@@ -1,4 +1,4 @@
-COMPOSE = docker compose -f infrastructure/compose.yaml
+COMPOSE = docker compose -f infrastructure/compose.yaml --env-file .env
 TF = terraform -chdir=infrastructure/terraform
 RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 RUN = --run-id $(RUN_ID)
