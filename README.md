@@ -46,13 +46,13 @@ Source triggers assign monotonically increasing cursor timestamps using a transa
 
 `make pipeline` runs extraction, raw validation, silver transformation, silver validation, gold modeling, gold validation, and publication in one run. `RUN_ID` defaults to a UTC timestamp; override it with `make pipeline RUN_ID=my-run`. Individual stages are available as `make validate`, `make transform`, and the CLI stage commands used by Airflow.
 
-Silver writes deduplicated, validated Parquet per dataset with quarantined rejects and checksums. Gold writes `dim_customer`, `dim_subscription`, `fact_payments`, and `fact_service_events`; facts are partitioned by month and published through `gold/_committed.json` after all objects verify. Previous committed runs stay readable, so an interrupted build cannot corrupt the current dataset. Run summaries and all eight metric results are written to `s3://aster-local-artifacts/runs/<run-id>/`. Metric definitions, attribution rules, and quality gates are documented in [docs/metrics.md](docs/metrics.md).
+Silver writes deduplicated, validated Parquet per dataset with quarantined rejects and checksums. Gold writes `dim_customer`, `dim_subscription`, `fact_payments`, `fact_service_events`, and a `revenue_trend_seed` calendar; facts are partitioned by month and published through `gold/_committed.json` after all objects verify. Previous committed runs stay readable, so an interrupted build cannot corrupt the current dataset. Empty source tables and empty backfill windows publish valid zero-row Parquet objects instead of failing. A schema-scoped PostgreSQL advisory lock serializes complete runs, and publication refuses to use gold built by another run. Run summaries and all eight metric results are written to `s3://aster-local-artifacts/runs/<run-id>/`. Metric definitions, attribution rules, quality gates, and intentional limits are documented in [docs/metrics.md](docs/metrics.md) and [docs/limitations.md](docs/limitations.md).
 
 `make query` prints the eight metrics from the committed gold dataset with DuckDB reading Parquet directly from MiniStack. Metric SQL lives in `sql/analytics/` and is exercised against hand-computed fixtures in `tests/unit/test_metrics_fixtures.py`.
 
 ## Orchestration
 
-`make airflow-up` builds the pinned Airflow image, initializes the `airflow` database and metadata (never dropping existing data), and starts the API server, scheduler, and DAG processor on loopback. The UI listens at `http://127.0.0.1:8080`; the admin password is `AIRFLOW_ADMIN_PASSWORD` from `.env` and user `admin`. `make airflow-run` executes the DAG with `airflow dags test`, and `make test-airflow` asserts registration, a successful run, and failure propagation.
+`make airflow-up` builds the pinned Airflow image, initializes the `airflow` database and metadata (never dropping existing data), and starts the API server, scheduler, and DAG processor on loopback. The UI listens at `http://127.0.0.1:8080`; the admin password is `AIRFLOW_ADMIN_PASSWORD` from `.env` and user `admin`. `make airflow-run` executes the DAG with `airflow dags test`. `make test-airflow` asserts registration, a successful run in an isolated schema and buckets, a real quality-gate failure that blocks publication, and the `0600` password file mode; the tests never touch the primary schema or the `aster-local-*` buckets.
 
 The DAG runs `extract_sources → validate_raw → transform_silver → validate_silver → build_gold → validate_gold → publish_run`, with two retries per task. A failing validation stops the chain before publication and the DAG run is marked failed. For a windowed backfill pass `--conf '{"window_start": "2025-03-01", "window_end": "2025-03-31"}'`; the windowed gold dataset is written under `gold/backfills/<run-id>/` and is deliberately not promoted to `gold/_committed.json`.
 
@@ -64,7 +64,7 @@ The DAG runs `extract_sources → validate_raw → transform_silver → validate
 - Duplicate replay of committed batches with unchanged silver/gold results.
 - Invalid source rows quarantined with reasons and without metric corruption.
 - Gold transformation interrupted before publication, leaving the previous committed dataset queryable.
-- Windowed backfill compared with a clean rebuild for date-local metrics and the trailing seven-day trend.
+- Windowed backfills compared with a clean rebuild for all eight metrics on every date, including the leading boundary and empty windows, using six lookback days of revenue for the seven-day trend.
 
 Each test asserts committed data, object keys, row counts, quarantine reasons, or metric values; exit codes alone are never treated as evidence. Details and known limitations are in [docs/checklist.md](docs/checklist.md).
 
@@ -78,4 +78,4 @@ Each test asserts committed data, object keys, row counts, quarantine reasons, o
 
 `make clean` asks for confirmation before deleting **all PostgreSQL and MiniStack data**. It retains Terraform state; after a reset, run `make up`, wait for readiness, then `make infra-apply` to reconcile it. Terraform destroy only deletes empty buckets. Delete unwanted objects explicitly before destroying infrastructure. No routine restart clears persistent state.
 
-See [checklist](docs/checklist.md). `make monitoring-down` stops the monitoring stack without deleting its volumes. Athena results are not evidence of AWS Athena compatibility or performance.
+See [checklist](docs/checklist.md) for milestone evidence and [limitations](docs/limitations.md) for local-only endpoints and credentials, unmeasured throughput and full-lake verification cost, cursor timestamp repurposing, and concurrency guarantees. `make monitoring-down` stops the monitoring stack without deleting its volumes. Athena results are not evidence of AWS Athena compatibility or performance.
