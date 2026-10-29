@@ -41,7 +41,9 @@ Raw batches are append-only. Silver deduplicates raw rows by business identity, 
 
 ## 8. Seven-day revenue trend
 
-`sql/analytics/seven_day_revenue_trend.sql`. Builds a continuous daily spine between the first and last successful payment date and reports the trailing inclusive seven-day revenue sum (`ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`). Days without revenue contribute zero. A windowed backfill only matches a full rebuild for days whose complete trailing window is inside the backfill range.
+`sql/analytics/seven_day_revenue_trend.sql`. Reports the trailing inclusive seven-day successful revenue sum (`ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`) for every date on a continuous daily calendar between the first and last successful payment date. Days without revenue contribute zero. The calendar is published as the `revenue_trend_seed` gold dataset (`calendar_date`, `is_lookback`, `prior_revenue`), derived from the committed silver payment snapshot.
+
+A windowed backfill writes a second `revenue_trend_seed` clipped to the requested window and marks the six days before the window start as lookback rows. Lookback revenue participates in the rolling sum but lookback rows are never returned, so a backfilled trend equals a full rebuild restricted to the same dates, including the first day of the window. When the window does not overlap the successful payment range the seed and the trend are empty rather than fabricated zero rows.
 
 ## Data quality gates
 

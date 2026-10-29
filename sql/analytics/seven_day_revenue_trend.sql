@@ -5,23 +5,28 @@ WITH successful AS (
       AND payment_date IS NOT NULL
     GROUP BY payment_date
 ),
-bounds AS (
-    SELECT min(payment_date) AS min_day, max(payment_date) AS max_day
-    FROM successful
+prior_revenue AS (
+    SELECT calendar_date, prior_revenue AS revenue
+    FROM revenue_trend_seed
+    WHERE is_lookback
 ),
-spine AS (
-    SELECT unnest(
-        generate_series(bounds.min_day, bounds.max_day, INTERVAL 1 DAY)
-    )::DATE AS revenue_date
-    FROM bounds
-    WHERE bounds.min_day IS NOT NULL
+revenue_by_day AS (
+    SELECT payment_date AS revenue_date, revenue FROM successful
+    UNION ALL
+    SELECT calendar_date AS revenue_date, revenue FROM prior_revenue
+),
+trend AS (
+    SELECT
+        seed.calendar_date AS revenue_date,
+        sum(coalesce(revenue_by_day.revenue, 0)) OVER (
+            ORDER BY seed.calendar_date
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        ) AS revenue_7d,
+        seed.is_lookback
+    FROM revenue_trend_seed AS seed
+    LEFT JOIN revenue_by_day ON revenue_by_day.revenue_date = seed.calendar_date
 )
-SELECT
-    spine.revenue_date,
-    sum(coalesce(successful.revenue, 0)) OVER (
-        ORDER BY spine.revenue_date
-        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-    ) AS revenue_7d
-FROM spine
-LEFT JOIN successful ON successful.payment_date = spine.revenue_date
-ORDER BY spine.revenue_date
+SELECT revenue_date, revenue_7d
+FROM trend
+WHERE NOT is_lookback
+ORDER BY revenue_date

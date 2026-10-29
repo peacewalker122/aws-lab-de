@@ -58,6 +58,13 @@ def connection():
         warehouse.execute(
             "CREATE TABLE fact_service_events (event_id VARCHAR, customer_key BIGINT, event_date DATE, event_type VARCHAR, duration_ms INTEGER, status_code INTEGER)"
         )
+        warehouse.execute(
+            "CREATE TABLE revenue_trend_seed (calendar_date DATE, is_lookback BOOLEAN, prior_revenue DECIMAL(38,2))"
+        )
+        warehouse.execute(
+            "INSERT INTO revenue_trend_seed SELECT calendar_date, FALSE, 0 FROM ("
+            "SELECT unnest(generate_series(DATE '2025-01-01', DATE '2025-01-07', INTERVAL 1 DAY))::DATE AS calendar_date)"
+        )
         warehouse.executemany(
             "INSERT INTO dim_customer VALUES (?, ?, ?, ?::DATE)", CUSTOMERS
         )
@@ -137,6 +144,24 @@ def test_seven_day_revenue_trend(connection):
         ("2025-01-05", Decimal("87.00")),
         ("2025-01-06", Decimal("87.00")),
         ("2025-01-07", Decimal("286.00")),
+    ]
+
+
+def test_seven_day_revenue_trend_includes_prior_window_revenue(connection):
+    connection.execute(
+        "INSERT INTO revenue_trend_seed VALUES ('2024-12-31', TRUE, 10.00)"
+    )
+    rows = metric(connection, "seven_day_revenue_trend")
+    assert rows[0] == ("2025-01-01", Decimal("48.00"))
+    assert rows[1] == ("2025-01-02", Decimal("97.00"))
+    assert [row[0] for row in rows] == [
+        "2025-01-01",
+        "2025-01-02",
+        "2025-01-03",
+        "2025-01-04",
+        "2025-01-05",
+        "2025-01-06",
+        "2025-01-07",
     ]
 
 

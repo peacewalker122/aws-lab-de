@@ -16,6 +16,8 @@ DIMENSIONS = ("dim_customer", "dim_subscription")
 FACTS = ("fact_payments", "fact_service_events")
 FACT_DATE_COLUMN = {"fact_payments": "paid_at", "fact_service_events": "event_time"}
 FACT_PARTITION = {"fact_payments": "payment_month", "fact_service_events": "event_month"}
+TREND_LOOKBACK_DAYS = 6
+TREND_SEED_TABLE = "revenue_trend_seed"
 PRIMARY_KEYS = {
     "customers": "customer_id",
     "subscriptions": "subscription_id",
@@ -42,6 +44,7 @@ class SilverResult:
 class GoldResult:
     run_id: str
     tables: dict
+    trend_seed: dict
     pointer: dict
 
 
@@ -249,6 +252,78 @@ def _silver_tables(connection, config, pointer, window):
             )
 
 
+def _trend_seed_query(window):
+    if window:
+        start = window[0].isoformat()
+        end = window[1].isoformat()
+        lookback_start = (window[0] - timedelta(days=TREND_LOOKBACK_DAYS)).isoformat()
+        range_start = f"greatest(DATE '{lookback_start}', bounds.min_day)"
+        range_end = f"least(DATE '{end}', bounds.max_day)"
+        window_start = f"greatest(DATE '{start}', bounds.min_day)"
+    else:
+        range_start = range_end = window_start = None
+    bounds = (
+        "SELECT CAST(min(paid_at) AS DATE) AS min_day, "
+        "CAST(max(paid_at) AS DATE) AS max_day FROM source_payments "
+        "WHERE status = 'succeeded' AND paid_at IS NOT NULL"
+    )
+    range_cte = (
+        "SELECT "
+        + (f"{range_start} AS range_start, {range_end} AS range_end, " if window else "bounds.min_day AS range_start, bounds.max_day AS range_end, ")
+        + (f"{window_start} AS window_start " if window else "bounds.min_day AS window_start ")
+        + "FROM bounds"
+    )
+    return (
+        "WITH bounds AS ("
+        + bounds
+        + "), date_range AS ("
+        + range_cte
+        + "), calendar AS ("
+        "SELECT unnest(generate_series(range_start, range_end, INTERVAL 1 DAY))::DATE AS calendar_date, "
+        "window_start FROM date_range WHERE range_start IS NOT NULL AND range_end IS NOT NULL"
+        "), prior AS ("
+        "SELECT CAST(s.paid_at AS DATE) AS calendar_date, sum(s.amount) AS prior_revenue "
+        "FROM source_payments s, date_range "
+        "WHERE s.status = 'succeeded' AND s.paid_at IS NOT NULL "
+        "AND CAST(s.paid_at AS DATE) < date_range.window_start "
+        "GROUP BY 1"
+        ") "
+        "SELECT calendar.calendar_date, "
+        "calendar.calendar_date < calendar.window_start AS is_lookback, "
+        "coalesce(prior.prior_revenue, 0) AS prior_revenue "
+        "FROM calendar LEFT JOIN prior USING (calendar_date) "
+        "ORDER BY calendar.calendar_date"
+    )
+
+
+def _publish_trend_seed(s3, config, connection, run_id, window):
+    connection.execute(
+        f"CREATE OR REPLACE TEMP TABLE {TREND_SEED_TABLE} AS {_trend_seed_query(window)}"
+    )
+    row_count = connection.execute(
+        f"SELECT count(*) FROM {TREND_SEED_TABLE}"
+    ).fetchone()[0]
+    prefix = f"gold/{TREND_SEED_TABLE}/run={run_id}"
+    keys = _publish_objects(
+        s3,
+        config.gold_bucket,
+        connection,
+        prefix,
+        f"SELECT * FROM {TREND_SEED_TABLE}",
+        row_count,
+    )
+    checksums = _verify_objects(
+        s3, connection, config.gold_bucket, keys, row_count, TREND_SEED_TABLE
+    )
+    log(
+        "gold_trend_seed_written",
+        table=TREND_SEED_TABLE,
+        rows=row_count,
+        objects=len(keys),
+    )
+    return {"objects": keys, "row_count": row_count, "checksums": checksums}
+
+
 def build_gold(s3, config, run_id, silver_pointer, window=None):
     with span("build_gold", run_id=run_id):
         connection = connect(config)
@@ -278,6 +353,7 @@ def build_gold(s3, config, run_id, silver_pointer, window=None):
                 "checksums": checksums,
             }
             log("gold_table_written", table=table, rows=row_count, objects=len(keys))
+        trend_seed = _publish_trend_seed(s3, config, connection, run_id, window)
         hit("gold-before-publish")
         pointer = {
             "run_id": run_id,
@@ -286,6 +362,8 @@ def build_gold(s3, config, run_id, silver_pointer, window=None):
             "window": [window[0].isoformat(), window[1].isoformat()]
             if window
             else None,
+            "trend_lookback_days": TREND_LOOKBACK_DAYS,
+            "trend_seed": trend_seed,
             "tables": tables,
         }
         if window:
@@ -297,7 +375,9 @@ def build_gold(s3, config, run_id, silver_pointer, window=None):
             )
         else:
             lake.put_json(s3, config.gold_bucket, "gold/_committed.json", pointer)
-        return GoldResult(run_id=run_id, tables=tables, pointer=pointer)
+        return GoldResult(
+            run_id=run_id, tables=tables, trend_seed=trend_seed, pointer=pointer
+        )
 
 
 def window_bounds(start, end):

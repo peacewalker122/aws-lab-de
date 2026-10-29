@@ -1,4 +1,5 @@
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -19,15 +20,16 @@ def seed_environment(config):
         seed(connection, "small", 42)
 
 
+def rows_as_strings(rows):
+    return [[str(value) for value in row.values()] for row in rows]
+
+
 def metric_rows(config, s3, pointer=None):
     connection = metrics.duckdb_connect(config)
     try:
         metrics.create_gold_views(connection, s3, config, pointer)
         return {
-            name: [
-                [str(value) for value in row.values()]
-                for row in metrics.run_metric(connection, name)
-            ]
+            name: rows_as_strings(metrics.run_metric(connection, name))
             for name in metrics.METRICS
         }
     finally:
@@ -227,32 +229,47 @@ def test_scenario_d_interrupted_gold_keeps_previous_commit(lake_env):
 
 
 def windowed_reference_metrics(config, s3, start, end):
+    trend = [
+        row
+        for row in metric_rows(config, s3)["seven_day_revenue_trend"]
+        if start <= row[0] <= end
+    ]
     connection = metrics.duckdb_connect(config)
     try:
         metrics.create_gold_views(connection, s3, config)
         connection.execute(
-            "CREATE TABLE fact_payments_full AS SELECT * FROM fact_payments"
+            "CREATE TEMP TABLE full_fact_payments AS SELECT * FROM fact_payments"
         )
         connection.execute(
-            "CREATE TABLE fact_events_full AS SELECT * FROM fact_service_events"
+            "CREATE TEMP TABLE full_fact_events AS SELECT * FROM fact_service_events"
         )
-        connection.execute("DROP VIEW fact_payments")
-        connection.execute("DROP VIEW fact_service_events")
         connection.execute(
-            f"CREATE TABLE fact_payments AS SELECT * FROM fact_payments_full "
+            f"CREATE OR REPLACE VIEW fact_payments AS SELECT * FROM full_fact_payments "
             f"WHERE payment_date BETWEEN DATE '{start}' AND DATE '{end}'"
         )
         connection.execute(
-            f"CREATE TABLE fact_service_events AS SELECT * FROM fact_events_full "
+            f"CREATE OR REPLACE VIEW fact_service_events AS SELECT * FROM full_fact_events "
             f"WHERE event_date BETWEEN DATE '{start}' AND DATE '{end}'"
         )
-        return {
-            name: [
-                [str(value) for value in row.values()]
-                for row in metrics.run_metric(connection, name)
-            ]
+        reference = {
+            name: rows_as_strings(metrics.run_metric(connection, name))
             for name in metrics.METRICS
+            if name != "seven_day_revenue_trend"
         }
+    finally:
+        connection.close()
+    reference["seven_day_revenue_trend"] = trend
+    return reference
+
+
+def payment_bounds(config, s3):
+    connection = metrics.duckdb_connect(config)
+    try:
+        metrics.create_gold_views(connection, s3, config)
+        return connection.execute(
+            "SELECT CAST(min(payment_date) AS VARCHAR), CAST(max(payment_date) AS VARCHAR) "
+            "FROM fact_payments WHERE payment_status = 'succeeded' AND payment_date IS NOT NULL"
+        ).fetchone()
     finally:
         connection.close()
 
@@ -261,52 +278,43 @@ def test_scenario_e_backfill_matches_clean_rebuild(lake_env):
     config, s3 = lake_env.config, lake_env.s3
     seed_environment(config)
     pipeline.run_pipeline(config, "backfill-a")
-    start, end = "2025-03-01", "2025-03-31"
-    reference = windowed_reference_metrics(config, s3, start, end)
-    backfill = run_aster(
-        config,
-        "--run-id",
-        "backfill-b",
-        "backfill",
-        "--start",
-        start,
-        "--end",
-        end,
+    first_day, last_day = (
+        date.fromisoformat(value) for value in payment_bounds(config, s3)
     )
-    assert json.loads(backfill.stdout)["status"] == "ok"
-    pointer = lake.get_json(
-        s3, config.gold_bucket, "gold/backfills/backfill-b/manifest.json"
-    )
-    assert pointer["window"] == [start, end]
-    observed = metric_rows(config, s3, pointer)
-    daily_metrics = (
-        "daily_successful_payment_revenue",
-        "daily_active_customers",
-        "daily_event_volume",
-        "p95_service_duration_by_day",
-    )
-    for name in daily_metrics:
-        assert observed[name] == reference[name], name
-    assert observed["revenue_by_region"] == reference["revenue_by_region"]
-    assert observed["revenue_by_plan"] == reference["revenue_by_plan"]
-    observed_errors = {
-        tuple(row[:2]): row for row in observed["service_error_rate_by_day_region"]
-    }
-    reference_errors = {
-        tuple(row[:2]): row for row in reference["service_error_rate_by_day_region"]
-    }
-    assert observed_errors == reference_errors
-    full_trend = {
-        row[0]: row
-        for row in metric_rows(config, s3)["seven_day_revenue_trend"]
-        if start <= row[0] <= end
-    }
-    backfilled_trend = {
-        row[0]: row
-        for row in observed["seven_day_revenue_trend"]
-        if row[0] >= "2025-03-07"
-    }
-    assert backfilled_trend == {
-        day: rows for day, rows in full_trend.items() if day >= "2025-03-07"
-    }
+    windows = [
+        (first_day, first_day),
+        (first_day + timedelta(days=6), first_day + timedelta(days=6)),
+        (first_day + timedelta(days=20), first_day + timedelta(days=30)),
+        (last_day - timedelta(days=6), last_day),
+    ]
+    for index, (start, end) in enumerate(windows):
+        run_id = f"backfill-{index}"
+        start_text, end_text = start.isoformat(), end.isoformat()
+        backfill = run_aster(
+            config,
+            "--run-id",
+            run_id,
+            "backfill",
+            "--start",
+            start_text,
+            "--end",
+            end_text,
+        )
+        assert json.loads(backfill.stdout)["status"] == "ok"
+        pointer = lake.get_json(
+            s3, config.gold_bucket, f"gold/backfills/{run_id}/manifest.json"
+        )
+        assert pointer["window"] == [start_text, end_text]
+        observed = metric_rows(config, s3, pointer)
+        reference = windowed_reference_metrics(config, s3, start_text, end_text)
+        assert sorted(observed) == sorted(metrics.METRICS)
+        for name in metrics.METRICS:
+            assert observed[name] == reference[name], (name, run_id)
+        expected_dates = [
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        ]
+        assert [
+            row[0] for row in observed["seven_day_revenue_trend"]
+        ] == expected_dates, run_id
     assert lake.committed_pointer(s3, config.gold_bucket, "gold")["run_id"] == "backfill-a"
