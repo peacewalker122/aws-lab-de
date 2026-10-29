@@ -147,6 +147,9 @@ def test_airflow_run_completes_in_isolated_schema_and_buckets(lake_env):
         s3, config.artifacts_bucket, f"runs/{run_id}/metrics.json"
     )
     assert len(metrics) == 8
+    staged = lake.get_json(s3, config.gold_bucket, f"gold/_staged/{run_id}.json")
+    assert staged["state"] == "staged"
+    assert staged["silver_run_id"] == run_id
     gold = lake.committed_pointer(s3, config.gold_bucket, "gold")
     assert gold is not None
     assert gold["run_id"] == run_id
@@ -185,6 +188,47 @@ def test_failed_quality_gate_blocks_publication(lake_env):
     assert lake.list_keys(s3, config.gold_bucket, "") == []
     assert lake.committed_pointer(s3, config.gold_bucket, "gold") is None
     assert lake.read_bytes(s3, config.raw_bucket, corrupted)
+
+
+def test_gold_quality_gate_blocks_staged_output_in_airflow(lake_env):
+    require_airflow()
+    config, s3 = lake_env.config, lake_env.s3
+    seeded(config)
+    run_id = "airflow-gold-gate"
+    for command in (
+        ("transform-silver",),
+        ("validate-silver",),
+        ("build-gold",),
+    ):
+        airflow(config, "python", "-m", "aster", "--run-id", run_id, *command)
+    assert (
+        lake.get_json(s3, config.gold_bucket, f"gold/_staged/{run_id}.json")
+        is not None
+    )
+    assert lake.committed_pointer(s3, config.gold_bucket, "gold") is None
+    staged = lake.get_json(s3, config.gold_bucket, f"gold/_staged/{run_id}.json")
+    object_key = staged["tables"]["fact_service_events"]["objects"][0]
+    table = pq.read_table(
+        io.BytesIO(lake.read_bytes(s3, config.gold_bucket, object_key))
+    )
+    buffer = io.BytesIO()
+    pq.write_table(table.slice(0, table.num_rows - 1), buffer, compression="zstd")
+    s3.put_object(Bucket=config.gold_bucket, Key=object_key, Body=buffer.getvalue())
+
+    rejected = airflow(
+        config, "python", "-m", "aster", "--run-id", run_id, "validate-gold",
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert '"command": "validate-gold"' in rejected.stdout
+    blocked = airflow(
+        config, "python", "-m", "aster", "--run-id", run_id, "publish-run",
+        check=False,
+    )
+    assert blocked.returncode != 0
+    assert "no passing gold validation" in blocked.stdout
+    assert lake.committed_pointer(s3, config.gold_bucket, "gold") is None
+    assert lake.get_json(s3, config.artifacts_bucket, f"runs/{run_id}/run.json") is None
 
 
 def test_airflow_admin_password_file_is_owner_only(lake_env):
