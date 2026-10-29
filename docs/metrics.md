@@ -2,7 +2,7 @@
 
 All timestamps are stored in UTC. Silver datasets store naive UTC timestamps produced from the source `timestamptz` values. Fact table dates are UTC calendar dates.
 
-Raw batches are append-only. Silver deduplicates raw rows by business identity, keeping the row with the highest source cursor (`updated_at` for mutable tables, `ingested_at` for events). Gold is rebuilt from the committed silver snapshot into run-specific object prefixes; `gold/_committed.json` is the publication marker.
+Raw batches are append-only. Silver deduplicates raw rows by business identity, keeping the row with the highest source cursor (`updated_at` for mutable tables, `ingested_at` for events). Gold is rebuilt from the committed silver snapshot into run-specific object prefixes. `build_gold` writes only `gold/_staged/<run-id>.json`, which embeds the exact silver pointer used for the build; after `validate_gold` passes against that immutable snapshot, `publish_run` writes `gold/_committed.json` (full rebuild) or `gold/backfills/<run-id>/manifest.json` (windowed backfill). The committed pointer is the publication marker; a staged pointer is never queryable as committed gold.
 
 | Surrogate key | Source | Ordering |
 |---|---|---|
@@ -54,3 +54,5 @@ Quality validation runs before publication and fails the run with a nonzero exit
 - Gold: row counts and checksums, surrogate-key uniqueness, and referential integrity of facts.
 
 Malformed rows are quarantined under `silver/<dataset>/run=<run>/rejected.parquet` with a `_reject_reason` column. Reasons include missing required fields, invalid statuses, negative amounts or durations, succeeded payments without `paid_at`, timestamps out of order, and unknown foreign keys.
+
+Gold validation also reconciles against the silver snapshot embedded in the staged pointer, not against whatever silver is committed when validation runs, and it fences a build whose silver snapshot has been superseded. A committed gold pointer without `revenue_trend_seed`, `silver`, or `silver_run_id` is reported as a legacy pointer: validation fails with the missing keys and an explicit rebuild command, and the existing gold objects are never deleted.
