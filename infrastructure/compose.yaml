@@ -1,0 +1,22 @@
+services:
+  ministack:
+    image: docker.io/ministackorg/ministack:1.5.33-full
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: s3,athena,glue
+      PERSIST_STATE: "1"
+      S3_PERSIST: "1"
+    volumes:
+      - ministack-state:/tmp/ministack-state
+      - ministack-s3:/tmp/ministack-data/s3
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  ministack-state:
+  ministack-s3:
